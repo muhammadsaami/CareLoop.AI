@@ -14,13 +14,16 @@ from app.api.routes import (
     adherence,
     appointments,
     checkins,
+    discharge_documents,
     health,
     medications,
     patients,
     warning_symptoms,
 )
 from app.core.config import get_settings
+from app.core.exceptions import CareLoopError
 from app.core.logging import configure_logging, get_logger
+from app.core.redaction import redact_secrets
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
@@ -45,11 +48,16 @@ app = FastAPI(
         "Post-hospital-discharge recovery and compliance assistant.\n\n"
         "**Phase 1** — Backend Foundation: patient data, medications, "
         "appointments, warning symptoms, check-ins, and adherence tracking.\n\n"
+        "**Phase 2** — Discharge document ingestion: secure PDF/image upload, "
+        "text extraction and OCR, and structured LLM extraction of "
+        "medications, appointments, and warning symptoms.\n\n"
         "> ⚠️ **Healthcare Safety Notice**: This API stores and retrieves "
         "structured data only. It does not diagnose, recommend treatments, "
-        "or determine emergency status."
+        "or determine emergency status. Extracted values are transcriptions "
+        "of what a clinician wrote and items flagged `needs_review` require "
+        "human confirmation."
     ),
-    version="1.0.0",
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -67,6 +75,37 @@ app.add_middleware(
 )
 
 # ── Global exception handler ──────────────────────────────────────────────────
+
+@app.exception_handler(CareLoopError)
+async def domain_exception_handler(request: Request, exc: CareLoopError) -> JSONResponse:
+    """
+    Translate a domain exception into a controlled HTTP response.
+
+    Only the client-safe message is returned.  Internal detail, stack
+    traces, and provider payloads are logged server-side and never sent to
+    the client.
+    """
+    if exc.status_code >= 500:
+        logger.error(
+            "Domain error on %s %s: type=%s detail=%s",
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+            exc.internal_detail or "-",
+        )
+    else:
+        logger.info(
+            "Domain error on %s %s: type=%s status=%s",
+            request.method,
+            request.url.path,
+            type(exc).__name__,
+            exc.status_code,
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": redact_secrets(exc.message, settings=settings)},
+    )
+
 
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -93,3 +132,4 @@ app.include_router(appointments.router, prefix=API_V1)
 app.include_router(warning_symptoms.router, prefix=API_V1)
 app.include_router(checkins.router, prefix=API_V1)
 app.include_router(adherence.router, prefix=API_V1)
+app.include_router(discharge_documents.router, prefix=API_V1)

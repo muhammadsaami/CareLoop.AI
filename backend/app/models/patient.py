@@ -70,6 +70,12 @@ class Patient(Base):
         back_populates="patient",
         lazy="select",
     )
+    # Phase 2: discharge documents are clinical records and are likewise
+    # never cascade-deleted.
+    discharge_documents: Mapped[list["DischargeDocument"]] = relationship(  # noqa: F821
+        back_populates="patient",
+        lazy="select",
+    )
 
     def __repr__(self) -> str:
         return f"<Patient id={self.id} name={self.name!r}>"

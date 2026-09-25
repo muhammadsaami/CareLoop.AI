@@ -9,6 +9,14 @@ from app.models.appointment import Appointment, AppointmentStatus
 from app.models.warning_symptom import WarningSymptom, SymptomSeverity
 from app.models.checkin import CheckIn
 from app.models.adherence_log import AdherenceLog
+from app.models.discharge_document import (
+    DischargeDocument,
+    DocumentType,
+    ProcessingStatus,
+    OcrStatus,
+    ExtractionStatus,
+)
+from app.models.extraction_run import ExtractionRun, ExtractionRunStatus
 
 __all__ = [
     "Patient",
@@ -19,4 +27,11 @@ __all__ = [
     "SymptomSeverity",
     "CheckIn",
     "AdherenceLog",
+    "DischargeDocument",
+    "DocumentType",
+    "ProcessingStatus",
+    "OcrStatus",
+    "ExtractionStatus",
+    "ExtractionRun",
+    "ExtractionRunStatus",
 ]

@@ -43,6 +43,11 @@ Thumbs.db
 *.log
 logs/
 
+# Uploaded patient documents (Phase 2) — never commit real discharge files.
+# Only the storage tree is ignored; individual file types are NOT blanket
+# ignored, so legitimate assets (sample PDFs, images) stay visible to git.
+storage/
+
 # Distribution / packaging
 *.egg
 *.whl

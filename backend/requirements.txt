@@ -22,3 +22,18 @@ httpx==0.28.0
 
 # Utilities
 python-multipart==0.0.20
+
+# ── Phase 2 — Discharge document ingestion, OCR, structured extraction ──────
+# PDF / image processing
+PyMuPDF==1.27.2.3
+
+# Image decoding + OCR
+Pillow==12.3.0
+pytesseract==0.3.13
+
+# LLM providers (structured extraction). Only the selected provider needs a key.
+# groq 0.11.0 calls httpx.Client(proxies=...), which httpx>=0.28 removed,
+# making the client unconstructable.  1.7.0 is the first line that works with
+# httpx 0.28 while keeping google-genai's httpx>=0.28.1 requirement satisfiable.
+groq==1.7.0
+google-genai==2.8.0
