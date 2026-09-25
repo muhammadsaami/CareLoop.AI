@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CareLoop AI — .gitignore
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Secrets — NEVER commit these
+.env
+*.env
+!.env.example
+
+# Python virtual environment
+.venv/
+venv/
+env/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.egg-info/
+dist/
+build/
+
+# Alembic generated (keep versions/ tracked)
+# alembic/versions/*.pyc
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Distribution / packaging
+*.egg
+*.whl
