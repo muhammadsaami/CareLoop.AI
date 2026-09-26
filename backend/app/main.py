@@ -2,6 +2,8 @@
 CareLoop AI — FastAPI Application Entry Point
 
 Phase 1: Backend Foundation
+Phase 2: Discharge document ingestion
+Phase 3: Grounded RAG retrieval
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ from app.api.routes import (
     health,
     medications,
     patients,
+    rag,
     warning_symptoms,
 )
 from app.core.config import get_settings
@@ -51,13 +54,18 @@ app = FastAPI(
         "**Phase 2** — Discharge document ingestion: secure PDF/image upload, "
         "text extraction and OCR, and structured LLM extraction of "
         "medications, appointments, and warning symptoms.\n\n"
+        "**Phase 3** — Grounded document retrieval: page-aware chunking of "
+        "extracted text, ChromaDB vector indexing, and tenant-scoped "
+        "retrieval that returns verbatim source excerpts with their page "
+        "number. Retrieval only — no answer generation.\n\n"
         "> ⚠️ **Healthcare Safety Notice**: This API stores and retrieves "
         "structured data only. It does not diagnose, recommend treatments, "
         "or determine emergency status. Extracted values are transcriptions "
         "of what a clinician wrote and items flagged `needs_review` require "
-        "human confirmation."
+        "human confirmation. Phase 3 retrieval returns source text only and "
+        "never generates clinical guidance."
     ),
-    version="2.0.0",
+    version="3.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
@@ -133,3 +141,4 @@ app.include_router(warning_symptoms.router, prefix=API_V1)
 app.include_router(checkins.router, prefix=API_V1)
 app.include_router(adherence.router, prefix=API_V1)
 app.include_router(discharge_documents.router, prefix=API_V1)
+app.include_router(rag.router, prefix=API_V1)

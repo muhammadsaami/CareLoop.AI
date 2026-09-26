@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import uuid
+import hashlib
 import pytest
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -44,6 +45,11 @@ if not TEST_DB_URL:
 from app.core.config import get_settings
 from app.core.database import Base, get_db
 from app.main import app
+from app.rag.embeddings.base import (
+    STOPWORDS,
+    EmbeddingProvider,
+    tokenize,
+)
 
 
 def _redact_url(url: str) -> str:
@@ -387,3 +393,257 @@ def document_client(db_session, phase2_settings):
     yield _factory
 
     app.dependency_overrides.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 3 — RAG retrieval fixtures
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class FakeEmbeddingProvider(EmbeddingProvider):
+    """
+    Deterministic stand-in for a real embedding model.
+
+    The suite must never download a 127 MB model or call an embedding API:
+    that would make `pytest` slow, network-dependent, and unable to assert
+    exact score thresholds.  This provider is therefore a **deterministic
+    bag-of-words fingerprint**, not a semantic model - tests that need real
+    semantic behaviour are marked separately and skip when the model is
+    absent.
+
+    Two properties matter for it to be a useful double:
+
+    * It is deterministic, so a chunk's vector never changes between runs and
+      an index can be re-read.
+    * Its score range is *stable and known* (roughly 0.0-0.6, floor 0.10),
+      so relevance-floor tests assert something real rather than an artefact.
+      256 buckets and stopword removal are what keep it well behaved: at 64
+      buckets, collisions made unrelated queries score higher than related
+      ones, which would have made these tests assert nonsense.  1024 buckets
+      go further - a 256-bucket space still collides often enough on a ~30
+      token chunk to hand an unrelated query a ~0.15 score and push it over
+      the floor, which is an artefact of the double rather than a real
+      retrieval property.
+
+    Its dimensions are intentionally different from both shipped providers so
+    a test cannot accidentally pass because the production value happened to
+    match.
+    """
+
+    name = "fake"
+    default_min_score = 0.10
+    dimensions_override = 1024
+
+    def __init__(self, settings=None, *, dimensions=None):
+        super().__init__(settings)
+        self._dimensions = dimensions or self.dimensions_override
+
+    @property
+    def dimensions(self) -> int:
+        return self._dimensions
+
+    def is_configured(self) -> bool:
+        return True
+
+    def _vector(self, text: str) -> list[float]:
+        vector = [0.0] * self._dimensions
+        for token in tokenize(text):
+            if token in STOPWORDS:
+                continue
+            bucket = (
+                int.from_bytes(
+                    hashlib.sha256(token.encode("utf-8")).digest()[:4], "big"
+                )
+                % self._dimensions
+            )
+            vector[bucket] += 1.0
+        return self.l2_normalize(vector)
+
+    def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._vector(text)
+
+    @property
+    def relevance_floor(self) -> float:
+        return self.default_min_score
+
+
+@pytest.fixture
+def fake_embeddings():
+    """A fresh deterministic provider, for direct unit tests."""
+    return FakeEmbeddingProvider()
+
+
+@pytest.fixture
+def rag_settings(tmp_path):
+    """
+    Settings with the Chroma index pointed at a per-test temp directory.
+
+    Every RAG test therefore gets a private, empty collection.  The real
+    `chroma_data/` tree is never created, read, or written by the suite.
+
+    The embedding provider is forced to `hashing` here purely as a
+    belt-and-braces guard: the services are additionally given
+    `FakeEmbeddingProvider` below, so no test can reach a model file even if
+    a developer's local `.env` selects the semantic provider.
+    """
+    chroma_dir = tmp_path / "chroma"
+    chroma_dir.mkdir(parents=True, exist_ok=True)
+    return get_settings().model_copy(
+        update={
+            "chroma_persist_directory": str(chroma_dir),
+            "chroma_collection_name": "careloop_documents",
+            "rag_embedding_provider": "hashing",
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_chroma_clients():
+    """
+    Drop chroma's process-global client cache around every test.
+
+    `chromadb.PersistentClient` is a process-wide singleton keyed on its
+    settings, so without this a test could inherit a client pointing at a
+    previous test's temp directory and read another test's vectors.
+    """
+    from app.rag.vector_store import reset_client_cache
+
+    reset_client_cache()
+    yield
+    reset_client_cache()
+
+
+@pytest.fixture
+def rag_client(db_session, rag_settings):
+    """
+    TestClient whose RAG services are fully isolated.
+
+    Both services receive the per-test settings, so the vector store and
+    chunker resolve against the temp Chroma directory, and both are handed
+    `FakeEmbeddingProvider` so no test downloads a model or opens a socket.
+    Nothing here touches the network or the developer's real index.
+    """
+    from app.api.deps import (
+        get_rag_indexing_service,
+        get_rag_retrieval_service,
+    )
+    from app.rag.indexing import RagIndexingService
+    from app.rag.retrieval import RagRetrievalService
+
+    embeddings = FakeEmbeddingProvider(rag_settings)
+
+    def _override_indexing():
+        yield RagIndexingService(
+            db_session, settings=rag_settings, embedding_provider=embeddings
+        )
+
+    def _override_retrieval():
+        yield RagRetrievalService(
+            db_session, settings=rag_settings, embedding_provider=embeddings
+        )
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_rag_indexing_service] = _override_indexing
+    app.dependency_overrides[get_rag_retrieval_service] = _override_retrieval
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def make_patient(db_session):
+    """Create a Patient row directly and return it."""
+    from app.models.patient import Patient
+
+    def _factory(name="Test Patient", suffix="1"):
+        patient = Patient(
+            name=name,
+            contact_number=f"+1-555-{suffix}",
+            caregiver_contact=f"+1-556-{suffix}",
+        )
+        db_session.add(patient)
+        db_session.flush()
+        db_session.refresh(patient)
+        return patient
+
+    return _factory
+
+
+@pytest.fixture
+def make_document(db_session):
+    """
+    Create a DischargeDocument row with realistic page-marked extracted text.
+
+    Bypasses the upload pipeline on purpose: RAG tests are about what happens
+    to text that ALREADY exists, and going through OCR/extraction would add
+    network and timing dependencies without testing anything RAG-specific.
+    """
+    from app.models.discharge_document import (
+        DischargeDocument,
+        DocumentType,
+        ProcessingStatus,
+    )
+
+    #: Two pages, each with content a query can actually match.
+    SAMPLE_TEXT = (
+        "--- PAGE 1 ---\n"
+        "Discharge summary for the patient following a planned hip replacement.\n\n"
+        "Medication on discharge: Paracetamol 500 mg to be taken orally every six "
+        "hours as required for pain relief. Continue for five days.\n\n"
+        "The wound dressing should be changed once daily and the area kept dry.\n"
+        "--- PAGE 2 ---\n"
+        "Follow up appointment with the orthopaedic team in fourteen days.\n"
+        "Physiotherapy exercises are to begin on the second day after discharge.\n"
+        "Contact the ward if there is a temperature above 38 degrees Celsius.\n"
+    )
+
+    def _factory(
+        patient,
+        *,
+        extracted_text=SAMPLE_TEXT,
+        processing_status=ProcessingStatus.COMPLETED,
+        filename="discharge-summary.pdf",
+        sha256=None,
+    ):
+        document = DischargeDocument(
+            patient_id=patient.id,
+            original_filename=filename,
+            stored_filename=f"{patient.id}-{filename}",
+            file_path=f"/tmp/{filename}",
+            content_type="application/pdf",
+            file_size=1024,
+            sha256_hash=sha256 or f"{abs(hash((patient.id, filename))) % (10**32):032d}",
+            document_type=DocumentType.DISCHARGE_SUMMARY,
+            processing_status=processing_status,
+            page_count=2 if extracted_text else 0,
+            extracted_text=extracted_text,
+        )
+        db_session.add(document)
+        db_session.flush()
+        db_session.refresh(document)
+        return document
+
+    _factory.SAMPLE_TEXT = SAMPLE_TEXT
+    return _factory
+
+
+@pytest.fixture
+def indexed_document(rag_client, make_patient, make_document):
+    """
+    A COMPLETED document that has already been indexed.
+
+    Returns `(patient, document, index_response_json)`.
+    """
+    patient = make_patient(name="Indexed Patient", suffix="0100")
+    document = make_document(patient)
+    response = rag_client.post(
+        f"/api/v1/rag/documents/{document.id}/index",
+        json={"patient_id": str(patient.id)},
+    )
+    assert response.status_code == 200, response.text
+    return patient, document, response.json()

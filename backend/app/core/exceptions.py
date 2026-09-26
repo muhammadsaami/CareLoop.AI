@@ -172,3 +172,93 @@ class EmptyDocumentTextError(CareLoopError):
     default_message = (
         "No readable text could be obtained from the document."
     )
+
+
+# ── Phase 3: RAG / vector retrieval ─────────────────────────────────────
+
+
+class DocumentNotIndexableError(CareLoopError):
+    """
+    The document exists but cannot be indexed into the vector store.
+
+    Raised for a document that failed processing, has no extracted text, or
+    whose text yields no usable chunks.  Indexing such a document would
+    create ungrounded or empty retrieval results.
+    """
+
+    status_code = 422
+    default_message = (
+        "This document cannot be indexed because it has no usable extracted "
+        "text."
+    )
+
+
+class VectorStoreError(CareLoopError):
+    """The vector store could not be reached or returned an error."""
+
+    status_code = 503
+    default_message = (
+        "The document search index is currently unavailable."
+    )
+
+
+class EmbeddingError(CareLoopError):
+    """The embedding provider could not produce a usable vector."""
+
+    status_code = 502
+    default_message = "Text could not be converted into a search vector."
+
+
+class EmbeddingNotConfiguredError(CareLoopError):
+    """The configured embedding provider does not exist."""
+
+    status_code = 503
+    default_message = "The configured embedding provider is not available."
+
+
+class EmbeddingFingerprintMismatchError(CareLoopError):
+    """
+    The stored vectors were produced by a different embedding model.
+
+    Raised when the vector collection's recorded embedding fingerprint does
+    not match the currently configured one.  This is a distinct, loud failure
+    because nothing about the mixed state looks wrong locally: the collection
+    opens, queries succeed, and every vector has a valid width.  The only
+    symptom is quietly incorrect ranking, where a passage about one drug
+    outranks a passage that actually answers the question.
+
+    ChromaDB validates vector WIDTH but has no concept of which model produced
+    the numbers, so two providers that both emit 384 dimensions are
+    indistinguishable to it.  This error is the backstop.
+
+    `409 Conflict` rather than 5xx: the request is valid, but the server's
+    stored state conflicts with its configuration, and no retry will help
+    until an operator re-indexes.
+    """
+
+    status_code = 409
+    default_message = (
+        "The search index was built with a different embedding model than the "
+        "one now configured, so it cannot be queried safely."
+    )
+
+
+class EmptyQueryError(CareLoopError):
+    """A retrieval request supplied no searchable text."""
+
+    status_code = 422
+    default_message = "Provide a non-empty query to search the document."
+
+
+class RetrievalForbiddenError(CareLoopError):
+    """
+    The requested document does not belong to the requested patient.
+
+    This is the tenancy guard for retrieval.  It deliberately reports the
+    same 404-shaped message as a missing document so that a caller cannot
+    probe for the existence of another patient's document by comparing
+    status codes.
+    """
+
+    status_code = 404
+    default_message = "No discharge document was found for this patient."

@@ -37,3 +37,36 @@ pytesseract==0.3.13
 # httpx 0.28 while keeping google-genai's httpx>=0.28.1 requirement satisfiable.
 groq==1.7.0
 google-genai==2.8.0
+
+# Phase 3 - RAG retrieval (ChromaDB)
+# 0.5.15 is the last 0.5.x line; it works with the pinned pydantic 2.6.1 and
+# lets us pass embeddings explicitly, so no model is managed by chroma itself.
+chromadb==0.5.15
+
+# Phase 3 - local semantic embeddings.
+#
+# app/rag/embeddings/semantic.py imports onnxruntime and tokenizers DIRECTLY,
+# so they are declared explicitly rather than inherited from chromadb: relying
+# on a transitive pin means a chromadb upgrade could silently remove the
+# inference runtime out from under the retrieval service.
+#
+# onnxruntime runs the model on CPU. This is the whole point of the choice:
+# it avoids torch (~2.5 GB installed) for a 33M-parameter model, and
+# onnxruntime is already present because chromadb depends on it, so the
+# semantic provider adds no heavyweight runtime. Inference is local - no
+# embedding API, no API key, and no outbound call on the request path.
+onnxruntime>=1.17.0
+tokenizers>=0.15.0
+
+# Used ONLY by the one-time operator CLI
+# (`python -m app.rag.embeddings.fetch_model`) to download the model weights.
+# The application never calls it while serving a request.
+huggingface_hub>=0.23.0
+
+# chromadb 0.5.15 calls posthog.capture(user_id, event, properties) with three
+# POSITIONAL args.  posthog 4+ changed the signature to capture(event, **kwargs),
+# so 4+ raises TypeError on every telemetry event.  Telemetry is disabled in
+# code (anonymized_telemetry=False) and could never carry document text - only
+# the chroma version and three infrastructure settings - but the pin keeps the
+# logs clean and keeps the library consistent if it is ever enabled.
+posthog>=2.4.0,<4
