@@ -45,6 +45,7 @@ if not TEST_DB_URL:
 from app.core.config import get_settings
 from app.core.database import Base, get_db
 from app.main import app
+from app.notifications.base import DeliveryReceipt
 from app.rag.embeddings.base import (
     STOPWORDS,
     EmbeddingProvider,
@@ -97,9 +98,10 @@ def clean_database():
         with conn.begin():
             conn.execute(
                 text(
-                    "TRUNCATE TABLE adherence_logs, checkins, warning_symptoms, "
-                    "appointments, medications, extraction_runs, "
-                    "discharge_documents, patients RESTART IDENTITY CASCADE;"
+                    "TRUNCATE TABLE notifications, reminders, adherence_logs, "
+                    "checkins, warning_symptoms, appointments, medications, "
+                    "extraction_runs, discharge_documents, patients "
+                    "RESTART IDENTITY CASCADE;"
                 )
             )
 
@@ -857,3 +859,183 @@ def agent_fixtures(rag_client, db_session, make_patient, make_document, rag_sett
         "settings": rag_settings,
         "db_session": db_session,
     }
+
+
+# -- Phase 5: Scheduling & notifications ---------------------------------------
+#
+# The console provider is the default NOTIFICATION_PROVIDER, so delivery is
+# inert unless a test opts in.  `RecordingNotificationProvider` below makes that
+# explicit: it counts sends so a test can assert a reminder reached the
+# transport exactly once, which is how the idempotency guarantee is verified.
+
+
+class RecordingNotificationProvider:
+    """
+    `NotificationProvider` double that records sends in memory.
+
+    Mirrors the real provider contract - including raising the domain
+    transient/permanent errors - so the retry policy is exercised through the
+    production code path rather than by stubbing the service.
+
+    `fail_times` drives the failure sequence: 2 means the first two sends raise
+    `transient_error` and the third succeeds, which is what the retry tests
+    need.
+    """
+
+    channel = "console"
+
+    def __init__(self, *, fail_times=0, transient_error=None, permanent_error=None):
+        self.sends = []
+        self._fail_times = fail_times
+        self._transient_error = transient_error
+        self._permanent_error = permanent_error
+
+    def is_configured(self):
+        return True
+
+    @property
+    def send_count(self) -> int:
+        return len(self.sends)
+
+    def send(self, *, recipient: str, body: str):
+        from app.core.exceptions import (
+            NotificationPermanentError,
+            NotificationTransientError,
+        )
+
+        # Recorded before the failure is raised, so a test can see that an
+        # attempt was actually made.
+        self.sends.append({"recipient": recipient, "body": body})
+        if self._permanent_error is not None:
+            raise self._permanent_error
+        if self._transient_error is not None and self._fail_times > 0:
+            self._fail_times -= 1
+            raise self._transient_error
+        return DeliveryReceipt(provider_message_id="recorded-1", status="recorded")
+
+
+@pytest.fixture
+def recording_provider():
+    """A provider that always succeeds and counts every send."""
+    return RecordingNotificationProvider()
+
+
+@pytest.fixture
+def phase5_settings():
+    """Settings with fast, deterministic retry timings for the suite."""
+    return get_settings().model_copy(
+        update={
+            "notification_provider": "console",
+            "notification_max_attempts": 3,
+            "notification_retry_base_seconds": 1,
+            "notification_retry_max_seconds": 4,
+            "scheduler_lookahead_seconds": 300,
+            "scheduler_batch_size": 100,
+        }
+    )
+
+
+@pytest.fixture
+def make_medication(db_session):
+    """Create a Medication row directly, with a realistic free-text frequency."""
+
+    from app.models.medication import Medication
+
+    def _factory(
+        patient,
+        *,
+        name="Metformin",
+        dosage="500 mg",
+        frequency="twice daily with meals",
+    ):
+        medication = Medication(
+            patient_id=patient.id,
+            name=name,
+            dosage=dosage,
+            frequency=frequency,
+        )
+        db_session.add(medication)
+        db_session.flush()
+        db_session.refresh(medication)
+        return medication
+
+    return _factory
+
+
+@pytest.fixture
+def make_appointment(db_session):
+    """Create an Appointment row with a timezone-aware date."""
+
+    from datetime import timedelta
+
+    from app.core.timezones import utcnow
+    from app.models.appointment import Appointment, AppointmentStatus
+
+    def _factory(patient, *, when=None, doctor_name="Dr. House"):
+        appointment = Appointment(
+            patient_id=patient.id,
+            doctor_name=doctor_name,
+            date=when or (utcnow() + timedelta(days=7)),
+            status=AppointmentStatus.scheduled,
+        )
+        db_session.add(appointment)
+        db_session.flush()
+        db_session.refresh(appointment)
+        return appointment
+
+    return _factory
+
+
+@pytest.fixture
+def phase5_services(db_session, phase5_settings, recording_provider):
+    """
+    Phase 5 services wired to the recording provider.
+
+    Everything the suite needs to drive scheduling directly, with no HTTP and
+    no network.  The provider is injected so the delivery path is real code.
+    """
+    from app.services.notification import NotificationService
+    from app.services.reminder import ReminderService
+    from app.services.scheduler import SchedulerService
+
+    reminder_service = ReminderService(db_session)
+    notification_service = NotificationService(
+        db_session, settings=phase5_settings, provider=recording_provider
+    )
+    scheduler_service = SchedulerService(
+        db_session, settings=phase5_settings
+    )
+    # The scheduler builds its own NotificationService; make sure it uses the
+    # same recording provider so a dispatch-then-deliver test sees the sends.
+    scheduler_service._notification_service = notification_service
+
+    return {
+        "db": db_session,
+        "settings": phase5_settings,
+        "provider": recording_provider,
+        "reminders": reminder_service,
+        "notifications": notification_service,
+        "scheduler": scheduler_service,
+    }
+
+
+@pytest.fixture
+def notification_client(db_session, phase5_settings, recording_provider):
+    """TestClient whose notification service always uses the recording provider."""
+    from app.api.deps import get_notification_service
+    from app.services.notification import NotificationService
+
+    def _override():
+        yield NotificationService(
+            db_session, settings=phase5_settings, provider=recording_provider
+        )
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_notification_service] = _override
+    client = TestClient(app)
+    client.recording_provider = recording_provider  # type: ignore[attr-defined]
+    yield client
+    app.dependency_overrides.clear()

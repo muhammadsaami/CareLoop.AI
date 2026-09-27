@@ -282,18 +282,43 @@ def test_no_database_migration_was_added_for_phase4():
     """
     Phase 4 is stateless, so it must not have altered the schema.
 
-    The agent creates no tables, so `alembic current` still points at the
-    Phase 3 head.
+    The agent creates no tables of its own.  This used to assert exactly two
+    migrations, which is now wrong for the right reason: Phase 5 legitimately
+    added a third (reminders/notifications).  The guard is restated in terms of
+    what it actually protects - no migration introduces an agent-owned table,
+    and the revision chain stays linear with Phase 4 not appearing in it.
     """
     import os
+    import re
 
     backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     versions = os.path.join(backend, "alembic", "versions")
     if not os.path.isdir(versions):
         pytest.skip("alembic versions directory not present")
-    files = [f for f in os.listdir(versions) if f.endswith(".py")]
-    # Phase 1-3 created the schema; Phase 4 must not add to it.
-    assert len(files) == 2, f"unexpected migration count: {files}"
+    files = sorted(
+        f for f in os.listdir(versions) if f.endswith(".py")
+    )
+
+    # Phase 1 created the schema, Phase 2 added discharge documents, Phase 5
+    # added scheduling.  Phase 4 contributed none.
+    assert len(files) == 3, f"unexpected migration count: {files}"
+
+    # No migration may create a table owned by the agent layer.
+    agent_tables = {"agent_runs", "agent_messages", "checkpoints", "agent_state"}
+    for name in files:
+        with open(os.path.join(versions, name), encoding="utf-8") as handle:
+            body = handle.read()
+        assert not (agent_tables & set(re.findall(r'create_table\(\s*"(\w+)"', body))), (
+            f"{name} creates an agent-owned table"
+        )
+
+    # The chain must be linear: each migration declares exactly one down_revision.
+    for name in files:
+        with open(os.path.join(versions, name), encoding="utf-8") as handle:
+            body = handle.read()
+        assert re.search(r"^down_revision\s*[:=]", body, re.MULTILINE), (
+            f"{name} does not declare a down_revision"
+        )
 
 
 def test_agent_package_imports_without_a_provider_key(agent_client):

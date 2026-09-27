@@ -20,8 +20,10 @@ from app.api.routes import (
     discharge_documents,
     health,
     medications,
+    notifications,
     patients,
     rag,
+    reminders,
     warning_symptoms,
 )
 from app.core.config import get_settings
@@ -144,3 +146,7 @@ app.include_router(adherence.router, prefix=API_V1)
 app.include_router(discharge_documents.router, prefix=API_V1)
 app.include_router(rag.router, prefix=API_V1)
 app.include_router(agent.router, prefix=API_V1)
+# Phase 5: scheduling & notifications.  `/health/ready` is registered by
+# the health router above and needs no prefix beyond API_V1.
+app.include_router(reminders.router, prefix=API_V1)
+app.include_router(notifications.router, prefix=API_V1)

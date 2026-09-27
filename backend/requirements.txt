@@ -83,3 +83,30 @@ posthog>=2.4.0,<4
 # environment is neither triggered nor altered by this line.  Adding it
 # upgrades no existing package.
 langgraph==1.2.11
+
+# --- Phase 5 -- Scheduling and notifications -----------------------------------
+# The reminder engine runs in a Celery worker; Redis is the broker and the
+# result backend.  Both are declared explicitly rather than inherited, so a
+# transitive upgrade cannot remove the queue the scheduler depends on.
+#
+# celery 5.6.x is pinned because 6.x changes task configuration defaults.
+# redis 5.1.1 is pinned as the client celery and the app's own caching layer
+# both use it; redis-py 6.x drops support for the event-loop patterns celery
+# 5.6 relies on.
+#
+# The API process imports the Celery app but never connects: `celery_app.py` is
+# reached from the worker entry point, not from `app.main`, so the API boots
+# with no broker running.
+celery==5.6.3
+redis==5.1.1
+
+# Zoneinfo database for `app.core.timezones`.  On Windows, `zoneinfo` resolves
+# names through the OS, which ships no tzdata by default, so an IANA name like
+# 'Asia/Kolkata' would raise at reminder-creation time.  The package is pinned
+# so DST behaviour is identical on every platform - and identical in CI, which
+# is not optional when a wrong offset shifts a dose by hours.
+#
+# Pinned to the version the suite was verified against; moving it forward
+# requires re-running tests/test_timezones.py, which is the guard for exactly
+# this risk.
+tzdata==2026.1

@@ -33,6 +33,22 @@ class Patient(Base):
     caregiver_contact: Mapped[str | None] = mapped_column(String(50), nullable=True)
     discharge_date: Mapped[date | None] = mapped_column(nullable=True)
 
+    # Phase 5: the IANA timezone this patient actually lives in, e.g.
+    # "Asia/Kolkata".  Every reminder created for this patient is interpreted
+    # in this zone, so "08:00 daily" means 08:00 where the patient is, not
+    # where the server happens to run.
+    #
+    # Defaults to UTC rather than being nullable: an unknown timezone must not
+    # silently shift a dose by hours.  UTC is the conservative choice (it is
+    # what the whole system already assumed before Phase 5) and it is
+    # corrected explicitly, with a 422, if it is ever wrong.
+    timezone: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="UTC",
+        server_default="UTC",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

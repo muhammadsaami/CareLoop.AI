@@ -17,6 +17,18 @@ from app.models.discharge_document import (
     ExtractionStatus,
 )
 from app.models.extraction_run import ExtractionRun, ExtractionRunStatus
+from app.models.reminder import (
+    Reminder,
+    ReminderType,
+    ReminderStatus,
+    Recurrence,
+)
+from app.models.notification import (
+    Notification,
+    NotificationType,
+    NotificationStatus,
+    DeliveryChannel,
+)
 
 __all__ = [
     "Patient",
@@ -34,4 +46,12 @@ __all__ = [
     "ExtractionStatus",
     "ExtractionRun",
     "ExtractionRunStatus",
+    "Reminder",
+    "ReminderType",
+    "ReminderStatus",
+    "Recurrence",
+    "Notification",
+    "NotificationType",
+    "NotificationStatus",
+    "DeliveryChannel",
 ]

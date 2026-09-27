@@ -262,3 +262,109 @@ class RetrievalForbiddenError(CareLoopError):
 
     status_code = 404
     default_message = "No discharge document was found for this patient."
+
+
+# ── Phase 5: Scheduling & notifications ────────────────────────────────
+
+
+class ReminderNotFoundError(CareLoopError):
+    status_code = 404
+    default_message = "Reminder not found."
+
+
+class ReminderValidationError(CareLoopError):
+    """
+    A reminder could not be built from the supplied structured data.
+
+    Covers an unknown timezone, a medication/appointment that does not belong
+    to the patient, and a schedule that contradicts itself.
+    """
+
+    status_code = 422
+    default_message = "The reminder could not be scheduled as requested."
+
+
+class InvalidTimezoneError(ReminderValidationError):
+    """
+    The requested IANA timezone is unknown to the platform.
+
+    422 rather than 500: the request carried a value this server cannot
+    resolve, and the caller can fix it without an operator.
+    """
+
+    default_message = (
+        "The supplied timezone is not a recognised IANA timezone name, "
+        "for example 'America/New_York'."
+    )
+
+
+class NotificationNotFoundError(CareLoopError):
+    status_code = 404
+    default_message = "Notification not found."
+
+
+class NotificationProviderError(CareLoopError):
+    """Generic notification delivery failure."""
+
+    status_code = 502
+    default_message = "The notification could not be delivered."
+
+
+class NotificationTransientError(NotificationProviderError):
+    """
+    A delivery failure that may succeed if retried.
+
+    A timeout, a 5xx, or a rate limit.  The scheduler retries these with
+    exponential backoff up to the configured attempt limit, then marks the
+    notification failed so a broken endpoint cannot loop forever.
+
+    `retryable` is the single source of truth for that decision: a provider
+    sets it rather than the scheduler guessing from an exception type.
+    """
+
+    status_code = 504
+    default_message = "The notification could not be delivered and will be retried."
+
+    retryable: bool = True
+
+
+class NotificationPermanentError(NotificationProviderError):
+    """
+    A delivery failure that retrying cannot fix.
+
+    A rejected destination, a malformed address, or revoked credentials.
+    These are failed immediately: retrying would waste the budget and, for a
+    revoked credential, keep hammering a provider that will keep refusing.
+    """
+
+    status_code = 502
+    default_message = "The notification could not be delivered."
+
+    retryable: bool = False
+
+
+class NotificationProviderNotConfiguredError(ConfigurationError):
+    """
+    The selected notification provider has no usable credentials.
+
+    Surfaced as 503 with the same shape as Phase 2's
+    `ProviderNotConfiguredError`, so a client learns the deployment is
+    misconfigured rather than that the reminder was refused.
+    """
+
+    default_message = (
+        "The configured notification provider is not available, so reminders "
+        "cannot be delivered."
+    )
+
+
+class SchedulerUnavailableError(CareLoopError):
+    """
+    The scheduler backend (Redis / Celery) could not be reached.
+
+    Distinct from a delivery failure: nothing was attempted, so a retry of the
+    whole dispatch is meaningful.
+    """
+
+    status_code = 503
+    default_message = "The reminder scheduler is currently unavailable."

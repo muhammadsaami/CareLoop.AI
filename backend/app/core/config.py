@@ -46,10 +46,13 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
-    # ── Future-phase stubs (not used in Phase 1) ─────────────────────────────
+    # ── Future-phase placeholders ───────────────────────────────────────────
+    # Phase 5 consumes the WhatsApp credentials below; they stay empty by
+    # default so no messaging provider is contacted unless one is selected AND
+    # configured.  `redis_url` has been promoted to a real setting in the
+    # Phase 5 block at the end of this class.
     whatsapp_access_token: str = ""
     whatsapp_phone_number_id: str = ""
-    redis_url: str = ""
 
     # ─────────────────────────────────────────────────────────────────────────────
     # Phase 2 — Discharge Summary Ingestion, OCR & Structured Extraction
@@ -200,6 +203,72 @@ class Settings(BaseSettings):
     agent_min_overlap_ratio: float = 0.30
     agent_log_graph_topology: bool = False
 
+    # ── Phase 5 - Scheduling & notifications ────────────────────────────────
+    # Redis backs both the Celery broker and the Celery result backend.  Left
+    # empty by default so the API and its tests run with no broker at all; a
+    # worker is only required to actually DELIVER reminders, never to create
+    # or list them.  Redis itself holds no PHI: it carries task ids and
+    # serialized arguments containing reminder ids only.
+    #
+    # NOTE: this replaces the Phase 1 "future-phase stub" of the same name.
+    # Credentials are never hardcoded - supply the whole URL via environment.
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Celery reads the broker from REDIS_URL by default.  Overridable so a
+    # deployment can point the broker and the result backend at separate
+    # Redis instances without touching code.
+    celery_broker_url: str = ""
+    celery_result_backend: str = ""
+    # Queue names are namespaced so a Phase 5 worker never competes with an
+    # unrelated Celery deployment on the same broker.
+    celery_queue: str = "careloop.notifications"
+
+    @field_validator("redis_url", mode="before")
+    @classmethod
+    def blank_redis_url_falls_back_to_default(cls, value: object) -> object:
+        """
+        Treat an empty ``REDIS_URL=`` as unset rather than as an empty broker.
+
+        An env file that carries the key with no value is an easy state to reach
+        by copying a template, and it silently beats the field default: the
+        worker then starts with ``broker_url=''`` and fails on its first
+        publish, which reads as a Celery bug rather than a configuration one.
+        Defaulting keeps a blank line harmless.
+        """
+        if isinstance(value, str) and not value.strip():
+            return "redis://localhost:6379/0"
+        return value
+
+    # 'console' is the safe default: it records a delivery without sending
+    # anything, so development and tests never contact a messaging provider.
+    # 'whatsapp' is opt-in and requires its credentials in the environment.
+    notification_provider: str = "console"
+    notification_timeout_seconds: int = 20
+
+    # Retry policy for transient delivery failures.  A notification is retried
+    # at most `max` times with exponential backoff, then marked failed so a
+    # permanently broken endpoint cannot loop forever.
+    notification_max_attempts: int = 3
+    notification_retry_base_seconds: int = 60
+    notification_retry_max_seconds: int = 3600
+
+    # How far ahead a due-scan looks, and how often the beat runs.  A reminder
+    # is materialized once and then sent, so a short window is sufficient; the
+    # value only needs to exceed the expected scheduler jitter.
+    scheduler_lookahead_seconds: int = 300
+    scheduler_batch_size: int = 100
+
+    @field_validator("notification_provider")
+    @classmethod
+    def validate_notification_provider(cls, value: str) -> str:
+        """Reject an unknown provider name at configuration time."""
+        name = (value or "").strip().lower()
+        if name not in {"console", "whatsapp"}:
+            raise ValueError(
+                "NOTIFICATION_PROVIDER must be one of: console, whatsapp."
+            )
+        return name
+
     @field_validator("chroma_collection_name")
     @classmethod
     def validate_collection_name(cls, value: str) -> str:
@@ -291,6 +360,37 @@ class Settings(BaseSettings):
             raise ValueError(
                 "AGENT_MIN_OVERLAP_RATIO must be between 0.0 and 1.0."
             )
+
+        # ── Phase 5 validation ────────────────────────────────────────────
+        # A retry policy that cannot fail, or cannot succeed, is a config bug
+        # rather than a runtime surprise, so it is rejected at startup.
+        if self.notification_max_attempts < 1:
+            raise ValueError(
+                "NOTIFICATION_MAX_ATTEMPTS must be at least 1."
+            )
+        if self.notification_retry_base_seconds < 1:
+            raise ValueError(
+                "NOTIFICATION_RETRY_BASE_SECONDS must be at least 1."
+            )
+        if self.notification_retry_max_seconds < self.notification_retry_base_seconds:
+            raise ValueError(
+                "NOTIFICATION_RETRY_MAX_SECONDS must be greater than or equal "
+                "to NOTIFICATION_RETRY_BASE_SECONDS."
+            )
+        if self.notification_timeout_seconds < 1:
+            raise ValueError(
+                "NOTIFICATION_TIMEOUT_SECONDS must be at least 1."
+            )
+        if self.scheduler_lookahead_seconds < 0:
+            raise ValueError(
+                "SCHEDULER_LOOKAHEAD_SECONDS must be 0 or greater."
+            )
+        if self.scheduler_batch_size < 1:
+            raise ValueError(
+                "SCHEDULER_BATCH_SIZE must be at least 1."
+            )
+        if not self.celery_queue.strip():
+            raise ValueError("CELERY_QUEUE must not be empty.")
         return self
 
     @property

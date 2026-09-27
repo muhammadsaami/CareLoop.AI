@@ -6,11 +6,164 @@
 ---
 
 ## Current Phase
-**Phase 4 — LangGraph Grounded Answer Agent (complete)**
+**Phase 5 — Scheduling and Notifications (complete)**
 
-Phase 1, Phase 2, and Phase 3 (listed below) remain fully supported and their
-tests still pass. Phase 4 is strictly **additive**: no existing behaviour, table,
-endpoint, or dependency was changed.
+Phase 1–4 (listed below) remain fully supported and their tests still pass.
+Phase 5 is strictly **additive**: no existing behaviour was changed. The one
+migration it adds is the third in the chain, and it creates new tables plus one
+nullable column (`patients.timezone`).
+
+### Phase 5 — Scheduling and Notifications
+
+A recurring-reminder engine that turns a clinician's explicit dose times into
+per-occurrence notifications, delivered by a Celery worker through a pluggable
+provider.
+
+#### The two rows
+
+| Row | Granularity | Mutable |
+| --- | --- | --- |
+| `reminders` | One **rule** — a schedule, not a moment | Yes: pause, resume, re-window, cancel |
+| `notifications` | One **occurrence** — a single moment | No: status and attempt count only |
+
+A rule carries `local_time` + `timezone` and computes the next occurrence. An
+occurrence is materialised ahead of time with a rendered body and a delivery
+status. Separating them is what makes "pause the 20:00 dose but keep the 08:00
+one" expressible.
+
+#### Times are never inferred
+
+`Medication.frequency` is free text (`"twice daily with meals"`). Nothing in
+Phase 5 parses it. Creating a medication reminder requires explicit `times`:
+
+```
+POST /api/v1/patients/{id}/reminders/medication
+{"medication_id": "...", "times": ["08:00", "20:00"]}
+```
+
+The request model sets `extra="forbid"`, so a `schedule` or `frequency` field is
+**rejected** rather than ignored. A caller who supplies prose and receives a 201
+would believe the schedule was honoured.
+
+When the supplied times contradict `frequency` (one time supplied, frequency
+implying two), the supplied schedule is used and the reminder is flagged
+`needs_review` with a log line. The system does not silently correct a
+clinician, and does not silently drop their instruction.
+
+#### Appointment times come from the appointment
+
+An appointment reminder takes only a lead time. The instant is derived from
+`Appointment.date`, which already exists:
+
+```
+POST /api/v1/patients/{id}/reminders/appointment
+{"appointment_id": "...", "lead_time_minutes": 60}
+```
+
+A `date` in the request is rejected. Two copies of the same fact would let them
+disagree, and the caller's copy would be the one silently ignored.
+
+#### Idempotency
+
+Every notification carries a deterministic key derived from
+`(reminder_id, occurrence UTC instant, channel)`, protected by a database
+UNIQUE index. Materialising the same occurrence twice returns the existing row.
+
+This is what makes Celery's at-least-once delivery safe. A worker killed after
+sending but before acknowledging re-runs the task, finds the key, and does
+nothing. The guarantee is in the database, not in Celery — the result backend is
+deliberately not involved (`task_ignore_result=True`).
+
+#### Overdue occurrences are skipped, not sent
+
+If the worker was down and an occurrence passed un-sent, it is **not** delivered
+late. A medication prompt hours overdue risks a double dose: the patient has
+probably already taken it, or deliberately skipped it. The occurrence is
+retired, the rule is advanced past **every** missed occurrence in one pass, and
+the skip is counted. Reconciliation is idempotent.
+
+#### Timezones and DST
+
+Times are stored as a local wall-clock time plus an IANA zone, and every
+occurrence is persisted as an aware UTC instant. `Patient.timezone` is the
+source; the request cannot override it.
+
+- A local time that **does not exist** (spring-forward gap) resolves forward,
+  preserving minutes.
+- A local time that **occurs twice** (autumn fall-back) resolves deterministically
+  via `fold=0`, so a 01:30 dose fires once, not twice.
+- A bad zone name is rejected when the patient is saved (422), not at
+  reminder-creation time.
+
+`tzdata` is a pinned dependency: on Windows, `zoneinfo` resolves through the OS,
+which ships no timezone database, so a wrong offset would shift a dose by hours.
+
+#### Running the worker
+
+The API and the worker are separate processes. The API imports the Celery app
+but never connects, so it boots and serves normally with no broker running —
+reminders simply stop and resume from the database when Redis returns.
+
+```bash
+celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+```
+
+Three recurring jobs:
+
+| Job | Cadence | Does |
+| --- | --- | --- |
+| `dispatch_due_reminders` | 60s | Materialise notifications for due occurrences |
+| `deliver_pending_notifications` | 60s | Send what is due and still pending |
+| `reconcile_scheduler` | 300s | Skip overdue occurrences, reclaim orphaned sends |
+
+The 300s dispatch look-ahead gives four chances to materialise an occurrence
+before it is due, so one missed tick does not skip a dose.
+
+#### Batch isolation
+
+One broken reminder — a patient with no reachable number, a deleted source row
+— must not stop anyone else's reminder. Each reminder is processed inside a
+SAVEPOINT, and materialising plus advancing happen in one transaction:
+
+- A failure rolls back to the savepoint, not the batch, and increments
+  `DispatchResult.failed`. A failed `flush()` otherwise leaves the PostgreSQL
+  transaction aborted and every other patient's reminder in the batch would fail
+  too.
+- The rule is still advanced past the failed occurrence, so a permanently broken
+  reminder is not retried on every tick.
+- Advancing from the failed occurrence (not from now) guarantees forward
+  progress; computing from now could land on the same occurrence again, because
+  a look-ahead occurrence sits ahead of now.
+
+#### Delivery providers
+
+`NOTIFICATION_PROVIDER=console` is the default and is deliberate: it records
+the attempt in the database and sends nothing, so development and tests cannot
+message a patient. `whatsapp` is opt-in and needs both credentials.
+
+- A missing credential raises a typed configuration error at **send** time, not
+  at construction, so a half-configured deployment degrades one delivery instead
+  of preventing the worker from booting. It never falls back to console.
+- `429`/`5xx`/timeouts are transient (retry with backoff); other `4xx` is
+  permanent. A `2xx` we cannot read a message id from is treated as transient,
+  because an unconfirmed delivery must not be recorded as sent.
+- No vendor response body ever reaches an error message. WhatsApp echoes the
+  recipient's number back in most `4xx` bodies; that text would land in
+  `Notification.last_error` and in API responses. The message carries a status
+  code and nothing else.
+
+#### What Phase 5 does not do
+
+- It does not read `Medication.frequency` to build a schedule.
+- It does not send late. Overdue occurrences are retired, not delivered.
+- It does not notify a caregiver by default, and does not escalate on a missed
+  dose.
+- It does not provide opt-in/opt-out consent capture. `Patient.consent_*` does
+  not exist yet, so WhatsApp to a caregiver is a Phase 6 concern.
+- It has no per-tenant authentication. The tenancy checks in the routes scope a
+  reminder to the patient in the path, but there is no identity layer yet, so
+  these endpoints are **not safe to expose publicly** as they stand.
 
 ### Phase 4 — LangGraph Grounded Answer Agent
 
@@ -344,9 +497,21 @@ matches.
   # then either add to PATH or set TESSERACT_CMD
   $env:TESSERACT_CMD="C:/Program Files/Tesseract-OCR/tesseract.exe"
   ```
-* **An LLM API key** (Phase 2, optional): Groq or Gemini. Only the selected
-  provider needs a key. Without one, uploads still store and extract text,
-  but structured extraction returns `503`.
+  * **An LLM API key** (Phase 2, optional): Groq or Gemini. Only the selected
+    provider needs a key. Without one, uploads still store and extract text,
+    but structured extraction returns `503`.
+  * **Redis** (Phase 5, required to *deliver* reminders): the Celery broker.
+    Not required to run the API or the test suite — reminders can be created,
+    listed, and inspected with no broker running, and delivery resumes from the
+    database once Redis is back. On Windows:
+    ```powershell
+    winget install Redis.Redis
+    # or with Docker:
+    docker run -d -p 6379:6379 redis:7-alpine
+    ```
+  * **WhatsApp Cloud API credentials** (Phase 5, optional): only if
+    `NOTIFICATION_PROVIDER=whatsapp`. The default `console` provider needs
+    nothing and sends nothing.
 
 ---
 
@@ -448,6 +613,30 @@ The API will be accessible at:
 - **Health Check**: `http://127.0.0.1:8000/api/v1/health`
 - **Interactive Swagger Docs**: `http://127.0.0.1:8000/docs`
 - **ReDoc Documentation**: `http://127.0.0.1:8000/redoc`
+
+### Trying the reminder endpoints (Phase 5)
+```powershell
+# 1. A medication reminder needs EXPLICIT dose times. `frequency` is free text
+#    and is never parsed, so there is no schedule field to send.
+$reminders = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/reminders/medication" `
+  -ContentType "application/json" `
+  -Body '{"medication_id":"<uuid>","times":["08:00","20:00"]}'
+
+# 2. Run a due scan by hand instead of waiting for the beat tick. Idempotent.
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/notifications/dispatch" `
+  -ContentType "application/json" -Body '{}'
+
+# 3. What the patient was actually told.
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/notifications"
+```
+
+Then start the worker and beat in two more terminals to actually deliver:
+```bash
+celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
+celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
+```
 
 ### Trying the upload endpoint
 ```powershell
@@ -669,12 +858,30 @@ wrong answer.
 ---
 
 ## Known Limitations
-- **The model weights must be fetched before first use.** The default provider
-  is a real semantic model, so a fresh checkout returns an actionable
-  `EmbeddingNotConfiguredError` from the retrieval endpoints until
-  `python -m app.rag.embeddings.fetch_model` has been run. This is intentional:
-  the application never downloads them at runtime. Set
-  `RAG_EMBEDDING_PROVIDER=hashing` for a model-free install.
+  - **Phase 5 endpoints have no authentication.** The routes scope a reminder to
+    the patient named in the path and return `404` for a cross-patient id, so
+    the tenancy checks are real — but there is no identity layer, so anyone who
+    can reach the API can read any patient's reminders. Do not expose these
+    publicly until Phase 8. This applies to the reminder and notification
+    endpoints only; Phases 1–4 share the same gap.
+  - **There is no caregiver consent capture.** `Patient` has no `consent_*`
+    field, so a caregiver is used as a recipient only if
+    `caregiver_contact` is already populated, with no record that the patient
+    agreed. Consent needs to be modelled before caregiver delivery is safe.
+  - **No missed-dose escalation.** An occurrence that passes un-sent is retired
+    and counted, and nothing alerts anyone. Escalation to a clinician is a
+    Phase 6 concern; until then, a missed dose is visible only in
+    `Notification.status`.
+  - **A single scheduler tick processes one batch.** If a batch cannot finish
+    inside the task's 60s soft limit, the remainder is picked up on the next
+    tick rather than in the same one. `SCHEDULER_BATCH_SIZE` is the knob, and
+    raising it without checking the timing risks timeouts.
+  - **The model weights must be fetched before first use.** The default provider
+    is a real semantic model, so a fresh checkout returns an actionable
+    `EmbeddingNotConfiguredError` from the retrieval endpoints until
+    `python -m app.rag.embeddings.fetch_model` has been run. This is intentional:
+    the application never downloads them at runtime. Set
+    `RAG_EMBEDDING_PROVIDER=hashing` for a model-free install.
 - **Vectors are not portable across providers or dimensions.** Changing the
   provider, the model, the revision, or `RAG_EMBEDDING_DIMENSIONS` invalidates
   every existing vector, and the collection now refuses to serve rather than
@@ -721,10 +928,11 @@ wrong answer.
 ## Future Phases
 
 ```text
-Phase 5 — Scheduler + WhatsApp
-Phase 6 — Daily Check-in + Escalation
-Phase 7 — React Dashboard
-Phase 8 — Security, Testing, Deployment
+Phase 6 - Daily Check-in + Escalation
+Phase 7 - React Dashboard
+Phase 8 - Security, Testing, Deployment
 ```
 
-Phase 4 (LangGraph agent workflow) is complete and is described above.
+Phases 1–5 are complete and described above. Phase 5 delivered the scheduling
+and notification foundation; Phase 6 starts at the check-in and escalation
+layer that sits on top of it.

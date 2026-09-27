@@ -9,12 +9,16 @@ from sqlalchemy.orm import Session
 from app.agent.generation import GroundedResponseGenerator
 from app.agent.safety import AgentSafetyValidator
 from app.agent.service import AgentService
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.llm.base import LLMProvider
 from app.rag.indexing import RagIndexingService
 from app.rag.retrieval import RagRetrievalService
 from app.services.discharge_document import DischargeDocumentService
 from app.services.extraction import ExtractionService
+from app.services.notification import NotificationService
+from app.services.reminder import ReminderService
+from app.services.scheduler import SchedulerService
 
 # Typed alias for injection — use this in route function signatures
 DbSession = Annotated[Session, Depends(get_db)]
@@ -128,6 +132,40 @@ def get_agent_service(
 
 AgentServiceDep = Annotated[AgentService, Depends(get_agent_service)]
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 5 — Scheduling & notifications
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def get_reminder_service(db: DbSession) -> ReminderService:
+    """Request-scoped reminder service (see the session note above)."""
+    return ReminderService(db)
+
+
+def get_notification_service(db: DbSession) -> NotificationService:
+    """
+    Request-scoped notification service.
+
+    The provider is built from settings here rather than injected by callers,
+    so a request path and a worker path resolve the same transport.  Tests
+    override this dependency to substitute the recording provider.
+    """
+    return NotificationService(db, settings=get_settings())
+
+
+def get_scheduler_service(db: DbSession) -> SchedulerService:
+    """Request-scoped scheduler service."""
+    return SchedulerService(db, settings=get_settings())
+
+
+ReminderServiceDep = Annotated[ReminderService, Depends(get_reminder_service)]
+NotificationServiceDep = Annotated[
+    NotificationService, Depends(get_notification_service)
+]
+SchedulerServiceDep = Annotated[SchedulerService, Depends(get_scheduler_service)]
+
+
 # Re-exported so tests and future routes share a single construction path.
 __all__ = [
     "AgentSafetyValidatorDep",
@@ -136,14 +174,20 @@ __all__ = [
     "GroundedResponseGeneratorDep",
     "LLMProviderDep",
     "DischargeDocumentServiceDep",
+    "NotificationServiceDep",
     "RagIndexingServiceDep",
     "RagRetrievalServiceDep",
+    "ReminderServiceDep",
+    "SchedulerServiceDep",
     "get_agent_safety_validator",
     "get_agent_service",
     "get_grounded_response_generator",
     "get_llm_provider",
     "get_discharge_document_service",
+    "get_notification_service",
     "get_rag_indexing_service",
     "get_rag_retrieval_service",
+    "get_reminder_service",
+    "get_scheduler_service",
     "ExtractionService",
 ]
