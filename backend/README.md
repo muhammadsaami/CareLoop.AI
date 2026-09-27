@@ -6,10 +6,119 @@
 ---
 
 ## Current Phase
-**Phase 3 — Grounded RAG Retrieval (complete)**
+**Phase 4 — LangGraph Grounded Answer Agent (complete)**
 
-Phase 1 and Phase 2 (listed below) remain fully supported and their tests
-still pass.
+Phase 1, Phase 2, and Phase 3 (listed below) remain fully supported and their
+tests still pass. Phase 4 is strictly **additive**: no existing behaviour, table,
+endpoint, or dependency was changed.
+
+### Phase 4 — LangGraph Grounded Answer Agent
+
+A fixed, acyclic `StateGraph` that answers a question about **one** discharge
+document using only text retrieved from that document.
+
+#### Graph topology
+
+```
+START
+  │
+  ▼
+validate_request ──────────────(blank query)──────────► END
+  │ (valid)
+  ▼
+retrieve_grounded_context ─────(no chunks)───────────► END
+  │ (chunks)
+  ▼
+generate_grounded_response
+  │ (draft exists)
+  ▼
+validate_safety ────────────────(safe)──────────────► END
+  │ (unsafe)
+  ▼
+safe_fallback ─────────────────────────────────────► END
+```
+
+There are **no cycles**. `tests/test_agent_graph.py` asserts the exact edge set
+and walks the graph for cycles, so a future "reflect" or "retry" node would fail
+the suite rather than quietly reintroduce an unbounded agent.
+
+#### Nodes
+
+| Node | Responsibility |
+| --- | --- |
+| `validate_request` | Normalise the query; reject blank input before any retrieval or provider spend |
+| `retrieve_grounded_context` | Call the **existing** `RagRetrievalService`; build sources from real chunk metadata |
+| `generate_grounded_response` | One call through the **existing** `LLMProvider`; returns schema-valid text and cited chunk ids only |
+| `validate_safety` | Independent re-check: citations, document scoping, overreach, lexical grounding. No LLM |
+| `safe_fallback` | The single terminal path for every withheld answer; emits `answer=null` and nothing clinical |
+
+#### Module layout
+
+```
+app/agent/
+├── __init__.py       public surface
+├── state.py          AgentState, GroundedSource, GroundedAnswer, SafetyFlagKind, Route
+├── prompts.py        the single grounded-answer prompt
+├── generation.py     provider call + citation resolution
+├── safety.py         AgentSafetyValidator, SafetyAssessment
+├── graph.py          nodes, routers, build_agent_graph
+└── service.py        AgentService (public entry point), AgentResult
+app/schemas/agent.py  GroundedAnswerRequest / GroundedAnswerResponse
+app/api/routes/agent.py  POST /api/v1/agent/query
+```
+
+#### How source grounding is enforced structurally
+
+The model is asked for `cited_chunk_ids` — opaque ids it was shown — and
+**nothing else about provenance**:
+
+```
+model output                real retrieved chunk
+------------                --------------------
+cited_chunk_ids  ────────►  GroundedSource(chunk_id, source_page, score)
+```
+
+`source_page` is copied from the Phase 3 chunk and is never accepted from the
+model. Two consequences, both intentional:
+
+- a **fabricated chunk id** is detected (it resolves to nothing) and the answer
+  is withheld;
+- a **fabricated page number** is not merely discouraged — it is unrepresentable.
+
+The model can therefore only *select among* provenance the system already
+established. It can never assert it.
+
+#### Phase 4 error semantics
+
+| Condition | Status | Why |
+| --- | --- | --- |
+| Answer withheld (no match, unsupported, overreach, fabricated citation) | **200** | A designed outcome: `answer=null`, `needs_review=true`, `safety_flags` populated |
+| Document not owned / not found | 404 | Same body as Phase 3, so document IDs cannot be enumerated |
+| Provider not configured | 503 | Actionable; identical to Phase 2 |
+| Provider timeout / rate limit / auth | 504 / 429 / 502 | Identical to Phase 2, so a client can retry |
+| Vector store or embedding unavailable | 503 | Identical to Phase 3 |
+| Fingerprint mismatch | 409 | Inherited from Phase 3 |
+| Blank or invalid request | 422 | Rejected at the edge |
+| Unforeseen internal fault | 200 | Contained, fails closed, nothing asserted — no stack trace to the client |
+
+Domain errors **propagate** rather than becoming `answer=null`. Reporting a
+provider outage as "this document does not cover your question" would be
+actively misleading, and disguising an authorization failure as a refusal would
+hide an isolation bug.
+
+#### Configuration
+
+All optional; the agent is safe with nothing configured.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENT_MAX_TOP_K` | `8` | Ceiling on a client-supplied `top_k` |
+| `AGENT_MAX_PROMPT_CHARS` | `12000` | Cap on source text per prompt |
+| `AGENT_MIN_OVERLAP_RATIO` | `0.30` | Required lexical overlap with cited sources |
+| `AGENT_LOG_GRAPH_TOPOLOGY` | `false` | Log node/edge names at startup |
+
+There is **no agent-specific API key**: the agent reuses the Phase 2 provider
+(`LLM_PROVIDER` plus that provider's key).
 
 ### Phase 1 — Production Backend Foundation
 - FastAPI modular web application with `/api/v1/` route versioning
@@ -355,6 +464,38 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/v1/discharge-docu
 The response contains counts and created record ids only — never the
 document text.
 
+### Asking a grounded question (Phase 4)
+
+```powershell
+# 1. Index the document (Phase 4 never indexes implicitly).
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/rag/documents/$documentId/index" `
+  -ContentType "application/json" `
+  -Body "{`"patient_id`":`"$($patient.id)`"}"
+
+# 2. Ask a question about it.
+$answer = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/agent/query" `
+  -ContentType "application/json" `
+  -Body "{`"patient_id`":`"$($patient.id)`",`"discharge_document_id`":`"$documentId`",`"query`":`"What medication was prescribed for pain relief?`"}"
+
+$answer.supported      # true only if grounded AND safety-validated
+$answer.answer         # null when nothing could be grounded
+$answer.needs_review   # true whenever answer is null
+$answer.safety_flags   # why an answer was withheld
+$answer.sources        # chunk_id + source_page + score, from real metadata
+```
+
+Read the three fields together. `supported = $true` means the answer is anchored
+to the cited passages and passed independent validation. `answer = $null` with
+`needs_review = $true` is a **designed safe outcome**, not a failure. Check
+`safety_flags` to see whether the document simply does not cover the question
+(`no_retrieval_match`) or whether the model's answer was rejected
+(`fabricated_source`, `medical_overreach`, `grounding_not_established`).
+
+The answer reports what the document says. It is not a diagnosis, not a
+treatment recommendation, and not a substitute for the care team.
+
 ---
 
 ## Running Automated Tests
@@ -492,6 +633,39 @@ And one deliberate omission: the Phase 3 API has **no** `answer`, `summary`,
 no LLM call. A test asserts those field names stay absent, so adding
 answer-shaped output later is a deliberate act rather than an accident.
 
+Phase 4 does add a generated answer, which is the first phase to cross that
+line. The properties below are enforced in code, independent of configuration
+and independent of the model:
+
+- **The model cannot assert provenance.** It is asked only for `cited_chunk_ids`
+  and never for a page number. Sources are resolved from the chunks retrieval
+  actually returned, so a fabricated page number is unrepresentable and a
+  fabricated chunk id is detected and withheld.
+- **The model is not trusted.** `agent/safety.py` assumes the prompt was
+  ignored and re-checks the output, reusing Phase 2's `has_overreach()` rather
+  than a parallel rule set. Diagnosis, dosage change, medication change, and
+  emergency phrasing are all flagged.
+- **Flagged answers are withheld, never rewritten.** Correcting clinical wording
+  is itself a medical judgement this system does not make.
+- **Any doubt fails closed.** `answer=null`, `supported=false`,
+  `needs_review=true`, and a machine-readable `safety_flags` reason. A validator
+  on both `AgentState` and the response schema makes a confident-looking empty
+  answer impossible to emit.
+- **The graph is acyclic and stateless.** No loops, no memory, no
+  conversation history, and no second LLM call to "double-check" the first.
+- **Tenancy is inherited, not reimplemented.** The agent has no Chroma call and
+  no second filtering path; `patient_id` + `discharge_document_id` scoping and
+  the embedding fingerprint check come from the Phase 3 service unchanged.
+
+**What the grounding check does not do.** It is a deterministic lexical guard:
+it confirms the answer reuses the vocabulary of the passages it cites. It is
+**not** semantic entailment, **not** medical verification, and **not** a proof
+that hallucination is impossible. A fluent sentence reusing a cited passage's
+vocabulary could still pass. This is why `needs_review` is part of the public
+contract and why any output must be read by a clinician before it reaches a
+patient. The system is built to fail toward silence, not toward a confident
+wrong answer.
+
 ---
 
 ## Known Limitations
@@ -522,15 +696,35 @@ answer-shaped output later is a deliberate act rather than an accident.
   uploads, and no encryption at rest beyond the filesystem's own. The Chroma
   index is included in this: `chroma_data/` holds verbatim document text and
   is git-ignored, but it is not encrypted.
+- **The agent is single-hop.** It cannot chain follow-up retrievals, re-rank,
+  or ask a clarifying question. Each request is one retrieval and one generation.
+  This is a deliberate consequence of excluding agent loops: cost and behaviour
+  stay bounded and predictable.
+- **Grounding is lexical, so faithful paraphrases can be withheld.** An answer
+  that uses entirely different wording from its source may fail the overlap
+  guard even though it is accurate. This errs toward silence, which is the
+  intended direction, but it means the agent will sometimes decline a
+  questionable question. Lower `AGENT_MIN_OVERLAP_RATIO` to tolerate more
+  summarising, at the cost of a weaker guard.
+- **Overreach detection is phrase-based.** Novel phrasings of a dosage change or
+  a diagnosis could evade the patterns. It is a backstop behind the grounding
+  and citation checks, not a proof.
+- **No clinical review workflow exists yet.** `needs_review=true` is a flag for
+  a human; nothing in this phase routes such cases to anyone, and no Phase 4
+  output should reach a patient without a clinician reading it.
+- **One provider serves both phases.** The same configured LLM handles Phase 2
+  extraction and Phase 4 answers, so an outage takes out both and the
+  configured model is exposed to discharge-document content.
 
 ---
 
 ## Future Phases
 
 ```text
-Phase 4 — LangGraph Agent Workflow
 Phase 5 — Scheduler + WhatsApp
 Phase 6 — Daily Check-in + Escalation
 Phase 7 — React Dashboard
 Phase 8 — Security, Testing, Deployment
 ```
+
+Phase 4 (LangGraph agent workflow) is complete and is described above.

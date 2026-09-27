@@ -191,6 +191,15 @@ class Settings(BaseSettings):
     # to tune against your own corpus.
     rag_min_score: Optional[float] = None
 
+    # ── Phase 4 - LangGraph grounded-answer agent ───────────────────────────
+    # Defaults are chosen so the agent is safe without any configuration: a
+    # blank run answers nothing, which is the correct behaviour for a tool
+    # that must not improvise clinical statements.
+    agent_max_top_k: int = 8
+    agent_max_prompt_chars: int = 12000
+    agent_min_overlap_ratio: float = 0.30
+    agent_log_graph_topology: bool = False
+
     @field_validator("chroma_collection_name")
     @classmethod
     def validate_collection_name(cls, value: str) -> str:
@@ -274,6 +283,14 @@ class Settings(BaseSettings):
             raise ValueError("RAG_SEMANTIC_MAX_TOKENS must be at least 32.")
         if self.rag_semantic_num_threads < 0:
             raise ValueError("RAG_SEMANTIC_NUM_THREADS must be 0 or greater.")
+        if self.agent_max_top_k < 1:
+            raise ValueError("AGENT_MAX_TOP_K must be at least 1.")
+        if self.agent_max_prompt_chars < 1000:
+            raise ValueError("AGENT_MAX_PROMPT_CHARS must be at least 1000.")
+        if not (0.0 <= self.agent_min_overlap_ratio <= 1.0):
+            raise ValueError(
+                "AGENT_MIN_OVERLAP_RATIO must be between 0.0 and 1.0."
+            )
         return self
 
     @property

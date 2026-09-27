@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import (
     adherence,
+    agent,
     appointments,
     checkins,
     discharge_documents,
@@ -142,3 +143,4 @@ app.include_router(checkins.router, prefix=API_V1)
 app.include_router(adherence.router, prefix=API_V1)
 app.include_router(discharge_documents.router, prefix=API_V1)
 app.include_router(rag.router, prefix=API_V1)
+app.include_router(agent.router, prefix=API_V1)

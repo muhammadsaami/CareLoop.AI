@@ -70,3 +70,16 @@ huggingface_hub>=0.23.0
 # the chroma version and three infrastructure settings - but the pin keeps the
 # logs clean and keeps the library consistent if it is ever enabled.
 posthog>=2.4.0,<4
+
+# ── Phase 4 — LangGraph grounded-answer agent ────────────────────────────────
+# langgraph ONLY.  `langchain` is deliberately NOT a dependency: the agent
+# calls the existing app.llm.base.LLMProvider abstraction, so nothing imports
+# langchain at runtime.
+#
+# Pinned to 1.2.11, which requires langchain-core>=1.4.7,<2 - already satisfied
+# by the chromadb-transitive langchain-core 1.6.0.  The agent imports no
+# langchain-community/-text-splitters/-openai/-groq package, so the
+# pre-existing langchain 0.3.x vs core 1.x conflict in the development
+# environment is neither triggered nor altered by this line.  Adding it
+# upgrades no existing package.
+langgraph==1.2.11

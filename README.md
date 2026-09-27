@@ -5,14 +5,77 @@ AI-powered post-hospital-discharge recovery and compliance assistant.
 ---
 
 ## Current Status
-**Phase 3 — Grounded RAG Retrieval (Completed & Verified)**
+**Phase 4 — LangGraph Grounded Answer Agent (Completed & Verified)**
 
-Index the text extracted in Phase 2 into ChromaDB and retrieve **verbatim
-source passages** with the page each came from. Retrieval only — no answer
-generation, no clinical guidance.
+Answer a question about one discharge document using **only** text retrieved
+from that document, with every source traced to a real chunk and page. A fixed,
+acyclic LangGraph pipeline — not an autonomous agent.
 
 For comprehensive backend setup instructions, architecture documentation, and testing guides, see:
 👉 [Backend README](backend/README.md)
+
+---
+
+## Phase 4 at a glance
+
+| Concern | How it is handled |
+| --- | --- |
+| Graph | Fixed `StateGraph` with **no cycles**; every edge is a pure function of state, and a test asserts the exact edge set so a loop cannot be added unnoticed |
+| Nodes | `validate_request` → `retrieve_grounded_context` → `generate_grounded_response` → `validate_safety` → `safe_fallback` |
+| State | Typed Pydantic `AgentState`; `graph.invoke()` returns a dict, so the service re-validates it into the model at the boundary |
+| Grounding | The model returns **only** answer text and `cited_chunk_ids`. It is never asked for a page number |
+| Provenance | Sources are resolved from **real retrieved chunks**. A model-invented chunk id resolves to nothing and is rejected; a model-invented page number is *unrepresentable* |
+| Independence | `validate_safety` assumes the model **did not** comply and re-checks independently. No second LLM call |
+| Reuse | Phase 3 `RagRetrievalService` and Phase 2 `LLMProvider` are used **as-is** — no second retrieval path, no new provider, no direct Chroma call |
+| Tenancy | Inherited, not reimplemented: `patient_id` + `discharge_document_id` scoping and the embedding fingerprint check come from the Phase 3 service |
+| Overreach | Phase 2's `has_overreach()` is called directly, plus agent-specific patterns for diagnosis, dose change, and emergency phrasing. Flagged answers are **withheld, never rewritten** |
+| Fail-closed | Any doubt ⇒ `answer=null`, `supported=false`, `needs_review=true`, plus a machine-readable `safety_flags` reason |
+| Stateless | No memory, no conversation history, no cross-request influence |
+| Secrets & PHI | The query, retrieved text, and the answer are never logged — only counts, flags, and IDs |
+
+### Endpoints
+
+```
+POST /api/v1/agent/query                             grounded answer for one document
+```
+
+### Safety boundary
+
+Phase 4 reports what a discharge document already says. It does not diagnose,
+prescribe, triage, or advise, and it never determines whether a situation is an
+emergency — that judgement belongs to a clinician.
+
+**What the grounding check is:** a deterministic lexical guard confirming the
+answer reuses the vocabulary of the passages it cites, plus a citation-
+authenticity check and an overreach check.
+
+**What it is not:** not semantic entailment, not medical verification, and not
+proof that hallucination is impossible. A fluent sentence that reuses a cited
+passage's vocabulary could still pass. That is why `needs_review` is part of the
+contract and why any output should be read by a clinician before it reaches a
+patient.
+
+`answer=null` with HTTP 200 is a **designed outcome, not an error** — check
+`safety_flags` to distinguish "the document does not cover this" from "the
+model's answer was rejected". Real faults (no provider key, provider timeout,
+vector store down, wrong patient) return the same status codes as Phases 1–3
+rather than being disguised as a refusal.
+
+### Known limitations
+
+- **Not a diagnostic or triage tool.** It answers questions about a document; it
+  does not reason about a patient.
+- Single-hop only. The agent cannot chain follow-up retrievals or ask a
+  clarifying question — that would require a loop, which Phase 4 excludes on
+  purpose.
+- Grounding is lexical, so a paraphrase using entirely different wording from
+  the source may be withheld even when it is faithful. This fails toward
+  silence, which is the intended direction, but it does mean the system will
+  sometimes decline an answerable question.
+- The overreach patterns are phrase-based. Novel ways of phrasing a dosage
+  change could evade them; this is a backstop, not a proof.
+- The same configured LLM provider serves extraction and answers. A provider
+  outage affects both.
 
 ---
 
@@ -155,7 +218,7 @@ a deterministic fake provider and never download or call a network service.
 - [x] **Phase 1** — Production Backend Foundation
 - [x] **Phase 2** — Discharge Summary OCR + Extraction
 - [x] **Phase 3** — Grounded RAG Retrieval (ChromaDB, retrieval only)
-- [ ] **Phase 4** — LangGraph Agent Workflow
+- [x] **Phase 4** — LangGraph Agent Workflow
 - [ ] **Phase 5** — Scheduler + WhatsApp
 - [ ] **Phase 6** — Daily Check-in + Escalation
 - [ ] **Phase 7** — React Dashboard

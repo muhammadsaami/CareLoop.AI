@@ -647,3 +647,213 @@ def indexed_document(rag_client, make_patient, make_document):
     )
     assert response.status_code == 200, response.text
     return patient, document, response.json()
+
+
+# -- Phase 4: LangGraph grounded-answer agent ---------------------------------
+#
+# The agent reuses the Phase 3 retrieval service and the Phase 2 provider
+# seam, so the fixtures below compose the SAME fakes those phases already use
+# rather than introducing a parallel mocking layer.  `FakeProvider` is
+# subclassed only to return an answer-shaped payload; the retrieval path, the
+# embedding provider, the Chroma temp directory, and the database session are
+# all the real Phase 3 objects.
+
+
+class FakeAnswerProvider(FakeProvider):
+    """
+    `LLMProvider` double that returns a grounded-answer payload.
+
+    Keeps the Phase 2 recording behaviour (`.calls` holds the prompts) so a
+    test can assert the model was shown the real chunk ids and nothing else.
+    """
+
+    name = "fake-answer"
+
+    #: Distinguishes "caller passed no payload" from "caller passed None",
+    #: so a test can hand the agent a literal `None` as malformed output.
+    _UNSET = object()
+
+    def __init__(self, payload=_UNSET, error=None, configured=True):
+        self.model = "fake-answer-model-v1"
+        self._payload = (
+            _default_answer() if payload is self._UNSET else payload
+        )
+        self._error = error
+        self._configured = configured
+        self.calls = []
+
+    def is_configured(self):
+        # Separable from `_error` so a test can distinguish "no API key
+        # configured" (503 path) from "the call failed" (502 path).
+        return self._configured
+
+    def extract_structured(
+        self, *, system_prompt, user_prompt, json_schema, schema_name
+    ):
+        self.calls.append(
+            {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "json_schema": json_schema,
+                "schema_name": schema_name,
+            }
+        )
+        if self._error is not None:
+            raise self._error
+        # Returned as-is when it is not a mapping, so a test can hand the agent
+        # a deliberately malformed payload (None, a string, a list) and exercise
+        # the real failure path. Dicts are copied so a caller mutating the
+        # result cannot affect a later call.
+        if isinstance(self._payload, dict):
+            return dict(self._payload)
+        return self._payload
+
+
+def _default_answer():
+    """
+    A well-formed answer payload.
+
+    `cited_chunk_ids` is deliberately EMPTY here: the real chunk ids are only
+    known at test time (they depend on the embedding provider's hashing), so a
+    test that wants a supported answer must fill them in.  Returning this as-is
+    models the honest refusal, which is the safe default for a fixture.
+    """
+    return {
+        "answer": None,
+        "supported": False,
+        "cited_chunk_ids": [],
+        "model_declined_reason": "no default payload configured for this test",
+    }
+
+
+@pytest.fixture
+def answer_provider():
+    """Provider that returns a well-formed refusal."""
+    return FakeAnswerProvider()
+
+
+@pytest.fixture
+def unconfigured_provider():
+    """Provider reporting `is_configured() == False` (the 503 path)."""
+    return FakeAnswerProvider(configured=False)
+
+
+@pytest.fixture
+def failing_answer_provider():
+    """Provider that always raises a domain error (the 502 path)."""
+    from app.core.exceptions import ProviderTimeoutError
+
+    return FakeAnswerProvider(error=ProviderTimeoutError("Provider timed out."))
+
+
+@pytest.fixture
+def agent_client(db_session, rag_settings, rag_client):
+    """
+    TestClient with the agent fully isolated and the LLM always mocked.
+
+    `rag_client` is depended on for its side effects: it has already installed
+    the Phase 3 retrieval override (real `RagRetrievalService`, temp Chroma
+    directory, `FakeEmbeddingProvider`) and the database override, so the
+    agent inherits the Phase 3 boundary rather than a test-only bypass of it.
+
+    The provider override is what guarantees no test can reach Groq or Gemini:
+    `get_grounded_response_generator` takes the same `LLMProviderDep` seam
+    Phase 2 uses, so overriding it here is sufficient.
+    """
+    from app.api.deps import get_grounded_response_generator
+    from app.agent.generation import GroundedResponseGenerator
+
+    holder = {"provider": FakeAnswerProvider()}
+
+    def _override_generator():
+        yield GroundedResponseGenerator(
+            settings=rag_settings, llm_provider=holder["provider"]
+        )
+
+    app.dependency_overrides[get_grounded_response_generator] = (
+        _override_generator
+    )
+    rag_client.agent_provider = holder["provider"]  # type: ignore[attr-defined]
+    rag_client.agent_settings = rag_settings  # type: ignore[attr-defined]
+    yield rag_client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def set_agent_answer(agent_client):
+    """
+    Replace the agent's provider payload mid-test.
+
+    Returns a setter so a test can install a supported answer, a fabricated
+    citation, a malformed payload, or a failure - without rebuilding the
+    dependency graph.
+    """
+    from app.agent.generation import GroundedResponseGenerator
+    from app.api.deps import get_grounded_response_generator
+
+    def _setter(payload=None, *, error=None, configured=True, provider=None):
+        holder = provider or FakeAnswerProvider(
+            payload=payload, error=error, configured=configured
+        )
+        agent_client.agent_provider = holder  # type: ignore[attr-defined]
+
+        def _override():
+            yield GroundedResponseGenerator(
+                settings=agent_client.agent_settings,  # type: ignore[attr-defined]
+                llm_provider=holder,
+            )
+
+        app.dependency_overrides[get_grounded_response_generator] = (
+            _override
+        )
+        return holder
+
+    yield _setter
+    app.dependency_overrides.pop(get_grounded_response_generator, None)
+
+
+@pytest.fixture
+def agent_fixtures(rag_client, db_session, make_patient, make_document, rag_settings):
+    """
+    Everything needed to drive the agent directly, without HTTP.
+
+    Returns a dict with an indexed patient/document pair, a real Phase 3
+    `RagRetrievalService`, a fake provider, and a real `AgentService` wired to
+    both.  Used by the unit-level tests; the API tests use `agent_client`.
+    """
+    from app.agent.generation import GroundedResponseGenerator
+    from app.agent.safety import AgentSafetyValidator
+    from app.agent.service import AgentService
+    from app.rag.indexing import RagIndexingService
+    from app.rag.retrieval import RagRetrievalService
+    from tests.conftest import FakeEmbeddingProvider
+
+    embeddings = FakeEmbeddingProvider(rag_settings)
+    patient = make_patient(name="Agent Patient", suffix="0400")
+    document = make_document(patient)
+
+    RagIndexingService(
+        db_session, settings=rag_settings, embedding_provider=embeddings
+    ).index_document(patient_id=patient.id, document_id=document.id)
+
+    retrieval = RagRetrievalService(
+        db_session, settings=rag_settings, embedding_provider=embeddings
+    )
+    provider = FakeAnswerProvider()
+    service = AgentService(
+        retrieval=retrieval,
+        generator=GroundedResponseGenerator(
+            settings=rag_settings, llm_provider=provider
+        ),
+        validator=AgentSafetyValidator(settings=rag_settings),
+        settings=rag_settings,
+    )
+    return {
+        "patient": patient,
+        "document": document,
+        "retrieval": retrieval,
+        "provider": provider,
+        "service": service,
+        "settings": rag_settings,
+        "db_session": db_session,
+    }

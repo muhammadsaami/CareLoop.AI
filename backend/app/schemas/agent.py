@@ -1,0 +1,179 @@
+"""
+CareLoop AI - Agent API Schemas (Phase 4)
+
+Strict request and response models for `POST /api/v1/agent/query`.
+
+`extra="forbid"` throughout: a client sending an unexpected field is an error,
+not something to silently drop.  On a clinical-adjacent endpoint an unrecognised
+parameter is far more likely to be a mistake than an intentional extra, and
+silently ignoring it produces an answer the client did not actually ask for.
+
+The response contract is deliberately shaped so an empty answer cannot look
+like a successful one:
+  * `answer` is `null` whenever `supported` is false;
+  * `supported` is false whenever `needs_review` is true;
+  * `sources` is empty whenever `answer` is null.
+
+Those are enforced by a model validator, not by convention, so no upstream bug
+can emit a response that reads as a confident answer with nothing behind it.
+"""
+from __future__ import annotations
+
+import uuid
+from typing import List, Optional
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+class GroundedAnswerRequest(BaseModel):
+    """A question about one discharge document, scoped to one patient."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    patient_id: uuid.UUID = Field(
+        ..., description="Patient whose discharge document is being queried"
+    )
+    discharge_document_id: uuid.UUID = Field(
+        ..., description="The document the answer must come from"
+    )
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="The question to answer from the document",
+    )
+    top_k: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=20,
+        description=(
+            "Chunks to retrieve. Omit to use the configured default. Capped "
+            "at 20 so a single request cannot produce an unbounded prompt."
+        ),
+    )
+
+    @field_validator("query")
+    @classmethod
+    def _reject_blank_query(cls, value: str) -> str:
+        """
+        Reject a whitespace-only query at the edge.
+
+        The graph handles this too, but rejecting it here means the client gets
+        a precise 422 instead of a well-formed "no answer" response to a
+        request that was never valid.
+        """
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("query must not be blank")
+        return stripped
+
+
+class GroundedSourceResponse(BaseModel):
+    """
+    Provenance for one supporting passage.
+
+    `source_page` is `null` when the document carried no page marker.  It is
+    never defaulted to 1 or estimated, because a wrong page number in a clinical
+    document is worse than an honest "unknown".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str = Field(
+        ..., description="Retrieval chunk identifier (opaque, stable)"
+    )
+    source_page: Optional[int] = Field(
+        default=None, description="Page the passage came from, if known"
+    )
+    score: float = Field(
+        ..., ge=0.0, le=1.0, description="Retrieval similarity for this passage"
+    )
+
+
+class GroundedAnswerResponse(BaseModel):
+    """
+    The final agent response.
+
+    Read the three booleans together:
+      * `supported=true`  -> `answer` is non-null and `sources` is non-empty.
+      * `supported=false` -> `answer` is null and `needs_review` is true.
+
+    An answer is a report of what a discharge document says. It is not a
+    diagnosis, not a clinical judgement, and not a substitute for the care
+    team. Lexical grounding reduces unsupported content; it does not certify
+    medical correctness.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: Optional[str] = Field(
+        default=None,
+        description=(
+            "The grounded answer, or null when no grounded answer could be "
+            "produced. Null is a deliberate, safe outcome, not an error."
+        ),
+    )
+    supported: bool = Field(
+        ...,
+        description=(
+            "True only when an answer is anchored to retrieved source text and "
+            "passed independent safety validation."
+        ),
+    )
+    needs_review: bool = Field(
+        ...,
+        description=(
+            "True when a human should look at this query. Set on every "
+            "withheld answer. A clinician must review any output before it "
+            "reaches a patient."
+        ),
+    )
+    safety_flags: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Machine-readable reasons an answer was withheld, e.g. "
+            "'no_retrieval_match', 'unsupported_by_sources', "
+            "'fabricated_source', 'medical_overreach'."
+        ),
+    )
+    sources: List[GroundedSourceResponse] = Field(
+        default_factory=list,
+        description=(
+            "Provenance for the answer, copied from real retrieved chunk "
+            "metadata. Never generated by the language model."
+        ),
+    )
+    trace_id: str = Field(
+        ..., description="Correlation id for this run; safe to quote in a bug report"
+    )
+    llm_provider: Optional[str] = Field(
+        default=None, description="Provider that produced the draft, if one was called"
+    )
+
+    @model_validator(mode="after")
+    def _enforce_contract(self) -> "GroundedAnswerResponse":
+        """Make a confident-looking empty answer impossible to emit."""
+        if self.supported:
+            if not self.answer or not self.answer.strip():
+                raise ValueError("supported=true requires a non-empty answer")
+            if not self.sources:
+                raise ValueError("supported=true requires at least one source")
+            if self.needs_review:
+                raise ValueError(
+                    "supported=true and needs_review=true are contradictory"
+                )
+        if self.answer is None and self.supported:
+            raise ValueError("answer=null cannot be supported=true")
+        if self.answer is None and not self.needs_review:
+            raise ValueError(
+                "answer=null requires needs_review=true so an absent answer is "
+                "never presented as settled"
+            )
+        return self
+
+
+__all__ = [
+    "GroundedAnswerRequest",
+    "GroundedAnswerResponse",
+    "GroundedSourceResponse",
+]
