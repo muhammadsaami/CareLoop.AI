@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 
+from app.api.auth_deps import (
+    require_rag_index_patient_access,
+    require_rag_retrieve_patient_access,
+)
 from app.api.deps import RagIndexingServiceDep, RagRetrievalServiceDep
 from app.core.logging import get_logger
 from app.schemas.rag import (
@@ -44,6 +48,7 @@ router = APIRouter(tags=["RAG Retrieval"])
         502: {"description": "Embedding provider failed"},
         503: {"description": "Vector store or embedding provider unavailable"},
     },
+    dependencies=[Depends(require_rag_retrieve_patient_access)],
 )
 def retrieve_chunks(
     payload: RagRetrieveRequest, service: RagRetrievalServiceDep
@@ -79,6 +84,7 @@ def retrieve_chunks(
         502: {"description": "Embedding provider failed"},
         503: {"description": "Vector store or embedding provider unavailable"},
     },
+    dependencies=[Depends(require_rag_index_patient_access)],
 )
 def index_document(
     document_id: uuid.UUID,

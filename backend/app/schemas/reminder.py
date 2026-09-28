@@ -192,6 +192,48 @@ class ReminderUpdate(BaseModel):
         return value
 
 
+class CheckInReminderCreate(BaseModel):
+    """
+    Create (or reuse) the daily check-in prompt for a patient.
+
+    Phase 6, but a `Reminder` like any other: the daily prompt reuses the Phase
+    5 scheduler, delivery, and retry machinery rather than introducing a second
+    thing that has to be scheduled, sent, and retried.
+
+    `local_time` is optional and defaults to the deployment's configured
+    `CHECKIN_PROMPT_LOCAL_TIME`.  It is a plain local clock time, not an
+    instant, and it is interpreted in the PATIENT's timezone - the same rule
+    Phase 5 applies to medication times, for the same reason: a prompt intended
+    for 09:00 must arrive at 09:00 on the patient's wall clock, not 09:00 UTC.
+
+    `extra="forbid"` for the Phase 5 reason: a caller who thinks they can
+    override the timezone or the recurrence should get an error, not silence.
+    The cadence is always daily and the interval is always 1; neither is
+    settable, because a "daily check-in" that fires every third day is a
+    different product and would have to be configured deliberately elsewhere.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    local_time: Optional[time] = None
+    timezone: Optional[str] = Field(
+        None,
+        max_length=64,
+        description=(
+            "IANA timezone for the prompt. Defaults to the patient's "
+            "recorded timezone."
+        ),
+    )
+    notes: Optional[str] = Field(None, max_length=2000)
+
+    @field_validator("timezone")
+    @classmethod
+    def _check_timezone(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return validate_timezone_name(value)
+
+
 class ReminderResponse(BaseModel):
     """Schema for reminder API responses."""
 

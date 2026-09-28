@@ -81,6 +81,8 @@ celery_app.conf.update(
 #     materialised notification is sent promptly.
 #   * `reconcile_scheduler` - 5 min housekeeping: skip overdue occurrences and
 #     reclaim notifications orphaned by a dead worker.
+#   * `notify_pending_escalations` - Phase 6, every minute: materialise the
+#     caregiver notification for any escalation that does not have one yet.
 celery_app.conf.beat_schedule = {
     "dispatch-due-reminders": {
         "task": "careloop.dispatch_due_reminders",
@@ -93,6 +95,15 @@ celery_app.conf.beat_schedule = {
     "reconcile-scheduler": {
         "task": "careloop.reconcile_scheduler",
         "schedule": 300.0,  # every 5 minutes
+    },
+    # Phase 6: materialise caregiver notifications for escalations that still
+    # need one.  Every minute, matching the delivery task, so a recovery
+    # notification is queued before the next delivery sweep picks it up rather
+    # than a full cycle later.  It only materialises; delivery is
+    # `deliver_pending_notifications` above.
+    "notify-pending-escalations": {
+        "task": "careloop.notify_pending_escalations",
+        "schedule": crontab(),  # every minute
     },
 }
 

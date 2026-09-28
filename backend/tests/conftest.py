@@ -8,7 +8,7 @@ import uuid
 import hashlib
 import pytest
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from starlette.testclient import TestClient
 
@@ -44,7 +44,10 @@ if not TEST_DB_URL:
 
 from app.core.config import get_settings
 from app.core.database import Base, get_db
+from app.core.security import create_access_token, hash_password
 from app.main import app
+from app.models.patient import Patient
+from app.models.user import AppUser
 from app.notifications.base import DeliveryReceipt
 from app.rag.embeddings.base import (
     STOPWORDS,
@@ -78,8 +81,72 @@ TestingSessionLocal = sessionmaker(
     bind=test_engine, autocommit=False, autoflush=False, class_=Session
 )
 
+#: Columns whose presence proves the test schema is not stale.  `create_all`
+#: only CREATES missing tables; it never adds a column to a table that already
+#: exists, so a test database created before a migration silently keeps the old
+#: shape and every later insert fails with a bare ProgrammingError naming a
+#: column the developer has never heard of.
+#:
+#: Phase 6's markers: `checkins.responses` and `escalations.id`.  When a phase
+#: adds a column, add its marker here too - the alternative is a stale test
+#: database that looks like dozens of unrelated failures.
+_SCHEMA_MARKERS = (
+    ("checkins", "responses"),
+    ("checkins", "status"),
+    ("escalations", "id"),
+    ("escalations", "rule_code"),
+    ("notifications", "escalation_id"),
+    ("app_users", "password_hash"),
+    ("app_users", "system_access"),
+    ("patient_access", "relationship"),
+    ("patient_access", "revoked_at"),
+)
+
+
+def _assert_test_schema_is_current() -> None:
+    """
+    Fail loudly, and at import, if the test schema predates a migration.
+
+    Without this the symptom is a wall of `ProgrammingError`s in whatever tests
+    happen to touch the changed table - which reads as a broken phase rather
+    than an out-of-date test database.  The instruction is explicit about the
+    remedy because there is no automatic fix that is also safe: recreating the
+    schema here would silently discard whatever the developer was debugging.
+    """
+    import sqlalchemy as sa
+
+    inspector = sa.inspect(test_engine)
+    existing_tables = set(inspector.get_table_names())
+    missing: list[str] = []
+    for table, column in _SCHEMA_MARKERS:
+        if table not in existing_tables:
+            missing.append(f"{table} (table missing entirely)")
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table)}
+        if column not in columns:
+            missing.append(f"{table}.{column}")
+    if missing:
+        raise RuntimeError(
+            "STALE TEST DATABASE: the test schema is missing "
+            f"{', '.join(missing)}.\n"
+            "`create_all` does not ALTER existing tables, so a test database "
+            "created before a migration keeps the old shape.\n"
+            f"Recreate it:  DROP DATABASE {_TEST_DB_NAME}; "
+            f"CREATE DATABASE {_TEST_DB_NAME}; then run the suite again.\n"
+            f"(test url: {_redact_url(TEST_DB_URL)})"
+        )
+
+
+def _test_db_name() -> str:
+    return TEST_DB_URL.rsplit("/", 1)[-1].split("?", 1)[0] or "careloop_test"
+
+
+#: Resolved once, for the error message above.
+_TEST_DB_NAME = _test_db_name()
+
 # Ensure tables exist in the test database
 Base.metadata.create_all(bind=test_engine)
+_assert_test_schema_is_current()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -96,11 +163,16 @@ def clean_database():
     yield
     with test_engine.connect() as conn:
         with conn.begin():
+            # `escalations` is listed explicitly, ahead of `checkins`, even
+            # though CASCADE would reach it: the list reads as the set of tables
+            # a test can write to, and a new table that is only truncated by
+            # cascade is easy to forget when a test starts asserting on it.
             conn.execute(
                 text(
-                    "TRUNCATE TABLE notifications, reminders, adherence_logs, "
-                    "checkins, warning_symptoms, appointments, medications, "
-                    "extraction_runs, discharge_documents, patients "
+                    "TRUNCATE TABLE notifications, escalations, reminders, "
+                    "adherence_logs, checkins, warning_symptoms, appointments, "
+                    "medications, extraction_runs, discharge_documents, "
+                    "patient_access, app_users, patients "
                     "RESTART IDENTITY CASCADE;"
                 )
             )
@@ -116,9 +188,181 @@ def db_session():
         session.close()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Authentication & patient access
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Every API test runs as a REAL principal with a REAL signed token against the
+# REAL authorization code. The alternative - overriding the auth dependency in
+# tests - would leave the feature untested by the entire suite, which is how an
+# authentication layer ends up "covered" while nothing verifies it.
+#
+# The one concession is that a patient created DURING a test is granted to the
+# test principal automatically, so the pre-existing tests keep working without
+# each one being edited. That grant is created by a SQLAlchemy `after_insert`
+# listener rather than by fixture code, so it also covers patients built
+# straight through `db_session` (the `make_patient` factory), which fixture code
+# would never see.
+#
+# Authorization tests opt OUT of the listener, and assert on the absence of a
+# grant. `_no_automatic_grants` is the opt-out switch.
+
+#: The principal every fixture-built client authenticates as.  `None` disables
+#: automatic granting, which is how an authorization test observes a principal
+#: that genuinely has no access to a patient.
+_AUTOGRANT_USER_ID: list = [None]
+
+
+@event.listens_for(Patient, "after_insert")
+def _grant_test_principal_access(mapper, connection, target):
+    """
+    Grant the ambient test principal access to any newly inserted `Patient`.
+
+    Fires for every `Patient` insert, including ones made by production code
+    (`POST /patients`). The route's own `grant_access` then finds the grant
+    already present and returns it, so the partial unique index
+    `ux_patient_access_user_patient_active` is never violated and no duplicate
+    row is created.
+
+    No-ops when no principal is registered, so the listener is inert outside an
+    autogranting test.
+    """
+    user_id = _AUTOGRANT_USER_ID[0]
+    if user_id is None:
+        return
+    connection.execute(
+        text(
+            "INSERT INTO patient_access (id, user_id, patient_id, relationship) "
+            "VALUES (:id, :user_id, :patient_id, 'self') "
+            "ON CONFLICT DO NOTHING"
+        ),
+        {
+            "id": uuid.uuid4(),
+            "user_id": user_id,
+            "patient_id": target.id,
+        },
+    )
+
+
 @pytest.fixture
-def client(db_session):
-    """FastAPI TestClient with overridden get_db dependency."""
+def no_automatic_grants():
+    """
+    Stop newly created patients from being granted to the test principal.
+
+    Required by any test asserting that access is REFUSED: without it the
+    listener hands out a grant the moment the patient row is inserted and the
+    test proves nothing.
+    """
+    _AUTOGRANT_USER_ID[0] = None
+    try:
+        yield
+    finally:
+        _AUTOGRANT_USER_ID[0] = None
+
+
+@pytest.fixture
+def auth_user(db_session, no_automatic_grants):
+    """
+    The principal every authenticated client acts as.
+
+    A real `AppUser` with a real bcrypt hash.  `system_access` is False by
+    default, matching production, so the whole-system notification endpoints
+    are refused unless a test explicitly grants operator rights.
+    """
+    user = AppUser(
+        email=f"test-{uuid.uuid4().hex[:12]}@example.invalid",
+        password_hash=hash_password("test-password-1234"),
+        is_active=True,
+        system_access=False,
+    )
+    db_session.add(user)
+    db_session.commit()
+    db_session.refresh(user)
+    yield user
+    db_session.delete(user)
+    db_session.commit()
+
+
+@pytest.fixture
+def auth_headers(auth_user, db_session, no_automatic_grants):
+    """
+    Bearer headers for `auth_user`, plus automatic granting of new patients.
+
+    Arranges the listener to fire for this principal, and restores the previous
+    state afterwards so a later test cannot inherit it.
+    """
+    _AUTOGRANT_USER_ID[0] = auth_user.id
+    try:
+        yield {"Authorization": f"Bearer {create_access_token(str(auth_user.id))}"}
+    finally:
+        _AUTOGRANT_USER_ID[0] = None
+
+
+@pytest.fixture
+def operator_auth_headers(auth_user, db_session, no_automatic_grants):
+    """
+    Bearer headers for a principal holding `system_access`.
+
+    `system_access` is the one global privilege, granted only by an operator in
+    production (there is no route that can set it), so a test that needs it
+    sets it here - on the same `auth_user` the rest of the suite uses.
+
+    Automatic granting is enabled too, exactly as in `auth_headers`: a system
+    operator still only sees patients they hold a grant for, and a test that
+    creates a patient through the API must still be able to read it back.
+    `system_access` widens WHICH endpoints are reachable, not which patients
+    are visible - the two are independent, and conflating them is the mistake
+    this comment exists to prevent.
+    """
+    auth_user.system_access = True
+    db_session.commit()
+    _AUTOGRANT_USER_ID[0] = auth_user.id
+    try:
+        yield {"Authorization": f"Bearer {create_access_token(str(auth_user.id))}"}
+    finally:
+        _AUTOGRANT_USER_ID[0] = None
+
+
+def _authorized_client(headers: dict, overrides: dict | None = None):
+    """
+    Build a TestClient that presents `headers` on every request.
+
+    `auth_headers` on the client rather than on each call, so the ~1,100
+    existing assertions read exactly as they did before authentication existed
+    and a reviewer can see that the tests did not need to change to keep
+    passing - which is the point of a change like this.
+    """
+    test_client = TestClient(app)
+    test_client.headers.update(headers)
+    for key, value in (overrides or {}).items():
+        app.dependency_overrides[key] = value
+    return test_client
+
+
+@pytest.fixture
+def client(db_session, auth_headers):
+    """FastAPI TestClient with overridden get_db dependency, authenticated."""
+    def override_get_db():
+        try:
+            yield db_session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+    with _authorized_client(auth_headers) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def anonymous_client(db_session):
+    """
+    A client that presents NO credential.
+
+    For the tests that assert 401.  It deliberately does not depend on
+    `auth_headers`, so nothing about the authenticated fixtures can leak into
+    it.
+    """
     def override_get_db():
         try:
             yield db_session
@@ -365,11 +609,14 @@ def valid_text_payload(text_pdf_bytes):
 
 
 @pytest.fixture
-def document_client(db_session, phase2_settings):
+def document_client(db_session, phase2_settings, auth_headers):
     """
     Factory for a TestClient whose discharge-document service is fully
     isolated: uploads go to a temp directory and the LLM provider is a
     test double, so no test ever touches the network or the real storage dir.
+
+    Clients are authenticated; see `auth_headers` for why the suite runs as a
+    real principal rather than with the auth dependency overridden.
     """
     from app.api.deps import get_discharge_document_service
     from app.services.discharge_document import DischargeDocumentService
@@ -390,7 +637,7 @@ def document_client(db_session, phase2_settings):
 
         app.dependency_overrides[get_db] = _override_get_db
         app.dependency_overrides[get_discharge_document_service] = _make(provider)
-        return TestClient(app)
+        return _authorized_client(auth_headers)
 
     yield _factory
 
@@ -519,7 +766,7 @@ def _reset_chroma_clients():
 
 
 @pytest.fixture
-def rag_client(db_session, rag_settings):
+def rag_client(db_session, rag_settings, auth_headers):
     """
     TestClient whose RAG services are fully isolated.
 
@@ -553,7 +800,7 @@ def rag_client(db_session, rag_settings):
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_rag_indexing_service] = _override_indexing
     app.dependency_overrides[get_rag_retrieval_service] = _override_retrieval
-    yield TestClient(app)
+    yield _authorized_client(auth_headers)
     app.dependency_overrides.clear()
 
 
@@ -1019,15 +1266,14 @@ def phase5_services(db_session, phase5_settings, recording_provider):
     }
 
 
-@pytest.fixture
-def notification_client(db_session, phase5_settings, recording_provider):
-    """TestClient whose notification service always uses the recording provider."""
+def _install_notification_overrides(db_session, settings, provider):
+    """Point the notification service at the recording provider."""
     from app.api.deps import get_notification_service
     from app.services.notification import NotificationService
 
     def _override():
         yield NotificationService(
-            db_session, settings=phase5_settings, provider=recording_provider
+            db_session, settings=settings, provider=provider
         )
 
     def _override_get_db():
@@ -1035,7 +1281,208 @@ def notification_client(db_session, phase5_settings, recording_provider):
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_notification_service] = _override
-    client = TestClient(app)
+
+
+@pytest.fixture
+def notification_client(db_session, phase5_settings, recording_provider, auth_headers):
+    """
+    TestClient whose notification service always uses the recording provider.
+
+    Authenticates as an ordinary principal: `system_access` is off, matching
+    production. Tests exercising the two whole-system endpoints
+    (`/notifications/dispatch`, `/notifications/retry`) need
+    `operator_notification_client` instead - which is the point, because those
+    endpoints walk every patient's rows and cannot be authorised by a
+    per-patient grant.
+    """
+    _install_notification_overrides(db_session, phase5_settings, recording_provider)
+    client = _authorized_client(auth_headers)
+    client.recording_provider = recording_provider  # type: ignore[attr-defined]
+    yield client
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def operator_notification_client(
+    db_session, phase5_settings, recording_provider, operator_auth_headers
+):
+    """`notification_client` for a principal holding `system_access`."""
+    _install_notification_overrides(db_session, phase5_settings, recording_provider)
+    client = _authorized_client(operator_auth_headers)
+    client.recording_provider = recording_provider  # type: ignore[attr-defined]
+    yield client
+    app.dependency_overrides.clear()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 6 — Daily check-ins & escalation
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def phase6_settings():
+    """
+    Phase 6 settings with every rule ACTIVE and notifications ENABLED.
+
+    Explicit rather than inherited: a test that exercises an escalation should
+    fail because of the rule it is testing, not because a deployment default
+    happened to be off.  Tests that want the pathway disabled override these
+    keys themselves.
+    """
+    return get_settings().model_copy(
+        update={
+            "checkin_escalation_enabled": True,
+            "checkin_notify_caregiver": True,
+            "checkin_enabled_rules": "",
+            "checkin_severity_floor": "low",
+            "checkin_prompt_local_time": "09:00",
+            "checkin_max_symptom_reports": 20,
+        }
+    )
+
+
+@pytest.fixture
+def make_warning_symptom(db_session):
+    """
+    Create a `WarningSymptom` for a patient.
+
+    `description` is realistic discharge-document prose, because the whole
+    design rests on NOT matching that text: a rule must fire from the stored
+    severity and the patient's coded answer, and must be identical however
+    differently the description is worded.
+    """
+
+    from app.models.warning_symptom import SymptomSeverity, WarningSymptom
+
+    def _factory(
+        patient,
+        *,
+        description="Increased breathlessness on exertion",
+        severity=SymptomSeverity.high,
+    ):
+        symptom = WarningSymptom(
+            patient_id=patient.id,
+            description=description,
+            severity=severity,
+        )
+        db_session.add(symptom)
+        db_session.flush()
+        db_session.refresh(symptom)
+        return symptom
+
+    return _factory
+
+
+@pytest.fixture
+def phase6_services(db_session, phase6_settings, recording_provider):
+    """
+    Phase 6 services wired to the recording provider.
+
+    The `NotificationService` is injected into `EscalationService` explicitly.
+    Without that, the escalation service would build its own notification
+    service from settings and a test would have no seam to observe or control
+    the caregiver send - the delivery path would be real code, but invisible.
+    """
+    from app.services.daily_checkin import DailyCheckInService
+    from app.services.escalation import EscalationService
+    from app.services.notification import NotificationService
+    from app.services.reminder import ReminderService
+    from app.services.scheduler import SchedulerService
+
+    notification_service = NotificationService(
+        db_session, settings=phase6_settings, provider=recording_provider
+    )
+    escalation_service = EscalationService(
+        db_session,
+        settings=phase6_settings,
+        notification_service=notification_service,
+    )
+    scheduler_service = SchedulerService(db_session, settings=phase6_settings)
+    # The scheduler builds its own NotificationService; point it at the
+    # recording one so a dispatch-then-deliver test sees the sends.
+    scheduler_service._notification_service = notification_service
+
+    return {
+        "db": db_session,
+        "settings": phase6_settings,
+        "provider": recording_provider,
+        "notifications": notification_service,
+        "escalations": escalation_service,
+        "reminders": ReminderService(db_session, settings=phase6_settings),
+        "scheduler": scheduler_service,
+        "checkins": DailyCheckInService(
+            db_session,
+            settings=phase6_settings,
+            escalation_service=escalation_service,
+        ),
+    }
+
+
+@pytest.fixture
+def checkin_client(db_session, phase6_settings, recording_provider, auth_headers):
+    """
+    TestClient for the Phase 6 endpoints.
+
+    BOTH Phase 6 services are overridden, not just the notification one.  The
+    escalation dependency has to be overridden as well, because it is the thing
+    that owns the notification service - overriding only the notification
+    dependency would leave the check-in route building an escalation service
+    with its own un-recording provider.
+    """
+    from app.api.deps import (
+        get_daily_checkin_service,
+        get_escalation_service,
+        get_notification_service,
+        get_reminder_service,
+    )
+    from app.services.daily_checkin import DailyCheckInService
+    from app.services.escalation import EscalationService
+    from app.services.notification import NotificationService
+    from app.services.reminder import ReminderService
+
+    def _notifications():
+        yield NotificationService(
+            db_session, settings=phase6_settings, provider=recording_provider
+        )
+
+    def _escalations():
+        yield EscalationService(
+            db_session,
+            settings=phase6_settings,
+            notification_service=NotificationService(
+                db_session,
+                settings=phase6_settings,
+                provider=recording_provider,
+            ),
+        )
+
+    def _checkins():
+        yield DailyCheckInService(
+            db_session,
+            settings=phase6_settings,
+            escalation_service=EscalationService(
+                db_session,
+                settings=phase6_settings,
+                notification_service=NotificationService(
+                    db_session,
+                    settings=phase6_settings,
+                    provider=recording_provider,
+                ),
+            ),
+        )
+
+    def _reminders():
+        yield ReminderService(db_session, settings=phase6_settings)
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    app.dependency_overrides[get_notification_service] = _notifications
+    app.dependency_overrides[get_escalation_service] = _escalations
+    app.dependency_overrides[get_daily_checkin_service] = _checkins
+    app.dependency_overrides[get_reminder_service] = _reminders
+    client = _authorized_client(auth_headers)
     client.recording_provider = recording_provider  # type: ignore[attr-defined]
     yield client
     app.dependency_overrides.clear()

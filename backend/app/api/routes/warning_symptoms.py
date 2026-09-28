@@ -6,8 +6,9 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Depends, Response, status
 
+from app.api.auth_deps import require_patient_access
 from app.api.deps import DbSession
 from app.schemas.warning_symptom import (
     WarningSymptomCreate,
@@ -25,6 +26,7 @@ router = APIRouter(tags=["Warning Symptoms"])
     status_code=status.HTTP_201_CREATED,
     summary="Add a warning symptom for a patient",
     responses={404: {"description": "Patient not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def create_symptom(
     patient_id: uuid.UUID, data: WarningSymptomCreate, db: DbSession
@@ -42,6 +44,7 @@ def create_symptom(
     response_model=List[WarningSymptomResponse],
     summary="List warning symptoms for a patient",
     responses={404: {"description": "Patient not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def list_symptoms(patient_id: uuid.UUID, db: DbSession) -> List[WarningSymptomResponse]:
     return WarningSymptomService(db).list_symptoms(patient_id)
@@ -52,6 +55,7 @@ def list_symptoms(patient_id: uuid.UUID, db: DbSession) -> List[WarningSymptomRe
     response_model=WarningSymptomResponse,
     summary="Update a warning symptom",
     responses={404: {"description": "Warning symptom not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def update_symptom(
     symptom_id: uuid.UUID, data: WarningSymptomUpdate, db: DbSession
@@ -65,6 +69,7 @@ def update_symptom(
     response_class=Response,
     summary="Delete a warning symptom",
     responses={404: {"description": "Warning symptom not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def delete_symptom(symptom_id: uuid.UUID, db: DbSession) -> Response:
     WarningSymptomService(db).delete_symptom(symptom_id)

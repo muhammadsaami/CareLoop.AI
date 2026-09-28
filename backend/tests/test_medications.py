@@ -25,6 +25,11 @@ def test_create_medication(client, sample_patient):
 
 
 def test_create_medication_invalid_patient(client):
+    """
+    403, not 404.  The caller holds no grant to this id, and the grant lookup
+    never touches `patients`, so the response must not reveal whether a patient
+    with this id exists.
+    """
     random_id = str(uuid.uuid4())
     payload = {
         "name": "Lisinopril",
@@ -32,8 +37,7 @@ def test_create_medication_invalid_patient(client):
         "frequency": "Once daily",
     }
     response = client.post(f"/api/v1/patients/{random_id}/medications", json=payload)
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Patient not found"
+    assert response.status_code == 403
 
 
 def test_create_medication_invalid_payload(client, sample_patient):
@@ -77,10 +81,53 @@ def test_get_medication_by_id(client, sample_patient):
 
 
 def test_get_medication_not_found(client):
+    """
+    Still 404, but answered by the AUTHORIZATION layer rather than the service.
+
+    This is the resource-keyed case, and it is the opposite of the patient-keyed
+    one: the caller supplied a medication id, so the row has to be resolved to
+    learn who owns it, and a 403 would confirm the medication is real. The same
+    404 is returned for "no such medication" and "not yours", so the id cannot
+    be used to probe which medications exist.
+
+    The generic body is a consequence of that, not a regression: the request
+    never reaches `MedicationService`, so its specific "Medication not found"
+    message is not the one that applies.
+    """
     random_id = str(uuid.uuid4())
     response = client.get(f"/api/v1/medications/{random_id}")
     assert response.status_code == 404
-    assert response.json()["detail"] == "Medication not found"
+    assert response.json()["detail"] == "Not found."
+
+
+def test_get_medication_of_another_patient_is_404(client, db_session, sample_patient):
+    """
+    A real medication belonging to a patient the caller has no grant to answers
+    404 - identical to the response for an id that does not exist.
+
+    This is the assertion that actually proves the endpoint is not an existence
+    oracle; the previous test alone would pass even with no authorization at all.
+    """
+    patient_id = sample_patient["id"]
+    create_res = client.post(
+        f"/api/v1/patients/{patient_id}/medications",
+        json={"name": "Metformin", "dosage": "500mg", "frequency": "Twice daily"},
+    )
+    medication_id = create_res.json()["id"]
+
+    # Drop the grant the fixture granted, leaving the medication intact.
+    from app.models.user import PatientAccess
+
+    db_session.query(PatientAccess).filter(
+        PatientAccess.patient_id == uuid.UUID(patient_id)
+    ).delete()
+    db_session.commit()
+
+    denied = client.get(f"/api/v1/medications/{medication_id}")
+    absent = client.get(f"/api/v1/medications/{uuid.uuid4()}")
+
+    assert denied.status_code == 404
+    assert denied.json() == absent.json()
 
 
 def test_update_medication(client, sample_patient):

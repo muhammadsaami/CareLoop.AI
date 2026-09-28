@@ -139,6 +139,59 @@ def retry_failed_notifications(self, limit: int = 100) -> Dict[str, Any]:
         session.close()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 6 — escalation notifications
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+@celery_app.task(name="careloop.notify_pending_escalations", bind=True)
+def notify_pending_escalations(self, limit: int = 100) -> Dict[str, Any]:
+    """
+    Build the caregiver notification for every escalation that still needs one.
+
+    This task only MATERIALISES notifications; it does not send them.  Delivery
+    belongs to `careloop.deliver_pending_notifications`, which already picks up
+    any `pending` notification whose scheduled time has arrived - including
+    these.  That is the whole reason Phase 6 adds one task rather than two: a
+    second send path would be a second retry policy and a second place for a
+    duplicate alert to be born.
+
+    WHY A TASK EXISTS AT ALL, WHEN SUBMISSION ALREADY REQUESTS NOTIFICATION
+    A check-in submission asks for its escalation's notification inline, so the
+    common case is handled during the request.  This task covers the cases that
+    are not: a submission that failed between committing the escalation and
+    materialising the notification, a worker that died in that window, and a
+    caregiver contact added to a patient record after the fact.  Without it,
+    those escalations would sit in `pending` indefinitely with nothing left to
+    pick them up.
+
+    IDEMPOTENT
+    An escalation that already has a notification is excluded by the query, and
+    the notification key is derived from the escalation id, so a repeated run
+    cannot produce a second alert about one event.
+
+    A failure on one escalation is rolled back individually and the batch
+    continues: one patient's bad row must not stop the other patients in the
+    same batch from being notified.
+    """
+    from app.services.escalation import EscalationService
+
+    session: Session = SessionLocal()
+    try:
+        service = EscalationService(session)
+        result = service.notify_pending(limit=limit)
+        session.commit()
+        return result
+    except Exception as exc:
+        session.rollback()
+        log_exception_without_phi(
+            logger, "task_failed", exc, task=self.name
+        )
+        raise
+    finally:
+        session.close()
+
+
 @celery_app.task(name="careloop.reconcile_scheduler", bind=True)
 def reconcile_scheduler(self, limit: int = 100) -> Dict[str, Any]:
     """

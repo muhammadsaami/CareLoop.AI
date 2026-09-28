@@ -7,7 +7,13 @@ from app.models.patient import Patient
 from app.models.medication import Medication
 from app.models.appointment import Appointment, AppointmentStatus
 from app.models.warning_symptom import WarningSymptom, SymptomSeverity
-from app.models.checkin import CheckIn
+from app.models.checkin import (
+    CheckIn,
+    CheckInStatus,
+    ConditionChange,
+    SymptomChange,
+    WellbeingAnswer,
+)
 from app.models.adherence_log import AdherenceLog
 from app.models.discharge_document import (
     DischargeDocument,
@@ -23,11 +29,22 @@ from app.models.reminder import (
     ReminderStatus,
     Recurrence,
 )
+from app.models.escalation import (
+    Escalation,
+    EscalationCategory,
+    EscalationStatus,
+    EscalationWorkflow,
+)
 from app.models.notification import (
     Notification,
     NotificationType,
     NotificationStatus,
     DeliveryChannel,
+)
+from app.models.user import (
+    AppUser,
+    PatientAccess,
+    AccessRelationship,
 )
 
 __all__ = [
@@ -38,6 +55,10 @@ __all__ = [
     "WarningSymptom",
     "SymptomSeverity",
     "CheckIn",
+    "CheckInStatus",
+    "ConditionChange",
+    "SymptomChange",
+    "WellbeingAnswer",
     "AdherenceLog",
     "DischargeDocument",
     "DocumentType",
@@ -50,8 +71,15 @@ __all__ = [
     "ReminderType",
     "ReminderStatus",
     "Recurrence",
+    "Escalation",
+    "EscalationCategory",
+    "EscalationStatus",
+    "EscalationWorkflow",
     "Notification",
     "NotificationType",
     "NotificationStatus",
     "DeliveryChannel",
+    "AppUser",
+    "PatientAccess",
+    "AccessRelationship",
 ]

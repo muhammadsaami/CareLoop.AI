@@ -156,9 +156,18 @@ class TestUploadValidation:
     def test_unknown_patient_returns_404(
         self, document_client, fake_provider, client
     ):
+        """
+        An ungranted caller is refused at the authorization layer with 403.
+
+        The name says 404 because that is what this returned before patient
+        access existed, and the change is the point: a 404 here confirmed that
+        the upload would have failed because the PATIENT does not exist, which
+        is patient-existence information.  The upload is refused either way -
+        what changes is that the reason is no longer disclosed.
+        """
         dc = document_client(fake_provider)
         response = upload(dc, str(uuid.uuid4()), make_pdf())
-        assert response.status_code == 404
+        assert response.status_code == 403
 
     def test_duplicate_upload_returns_409(
         self, document_client, fake_provider, client, patient_id
@@ -346,10 +355,11 @@ class TestRetrieval:
         assert response.json() == []
 
     def test_list_documents_unknown_patient_returns_404(self, client):
+        """403, not 404: see `test_unknown_patient_returns_404`."""
         response = client.get(
             f"/api/v1/patients/{uuid.uuid4()}/discharge-documents"
         )
-        assert response.status_code == 404
+        assert response.status_code == 403
 
 
 # ── Reprocess ───────────────────────────────────────────────────────────────

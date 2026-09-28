@@ -62,6 +62,22 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
+            # One transaction PER MIGRATION, not one for the whole run.
+            #
+            # Required since Phase 6, which adds enum values with
+            # `ALTER TYPE ... ADD VALUE` and then references those new values
+            # from an index predicate. Postgres only makes a new enum value
+            # visible on COMMIT, so under the default single-transaction run a
+            # later migration in the same run fails with
+            # `unsafe use of new value "checkin" of enum type reminder_type` -
+            # and because the whole run shares a transaction, the earlier
+            # revision's successful work is rolled back with it.
+            #
+            # Per-migration transactions also mean a failure leaves the database
+            # at the last fully applied revision instead of at the previous
+            # one, which is the behaviour an operator expects from a migration
+            # tool.
+            transaction_per_migration=True,
         )
 
         with context.begin_transaction():

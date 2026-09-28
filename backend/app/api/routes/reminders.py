@@ -19,8 +19,9 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
+from app.api.auth_deps import require_patient_access
 from app.api.deps import ReminderServiceDep
 from app.models.reminder import ReminderStatus
 from app.schemas.reminder import (
@@ -38,6 +39,7 @@ router = APIRouter(prefix="/patients", tags=["reminders"])
     response_model=list[ReminderResponse],
     status_code=status.HTTP_201_CREATED,
     summary="Create recurring medication reminders from explicit dose times",
+    dependencies=[Depends(require_patient_access)],
 )
 def create_medication_reminders(
     patient_id: uuid.UUID,
@@ -60,6 +62,7 @@ def create_medication_reminders(
     response_model=ReminderResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a one-shot reminder ahead of an existing appointment",
+    dependencies=[Depends(require_patient_access)],
 )
 def create_appointment_reminder(
     patient_id: uuid.UUID,
@@ -80,6 +83,7 @@ def create_appointment_reminder(
     "/{patient_id}/reminders",
     response_model=list[ReminderResponse],
     summary="List a patient's reminders",
+    dependencies=[Depends(require_patient_access)],
 )
 def list_reminders(
     patient_id: uuid.UUID,
@@ -101,6 +105,7 @@ def list_reminders(
     "/{patient_id}/reminders/{reminder_id}",
     response_model=ReminderResponse,
     summary="Fetch one reminder",
+    dependencies=[Depends(require_patient_access)],
 )
 def get_reminder(
     patient_id: uuid.UUID,
@@ -126,6 +131,7 @@ def get_reminder(
     "/{patient_id}/reminders/{reminder_id}",
     response_model=ReminderResponse,
     summary="Update a reminder's lifecycle or active window",
+    dependencies=[Depends(require_patient_access)],
 )
 def update_reminder(
     patient_id: uuid.UUID,
@@ -153,6 +159,7 @@ def update_reminder(
     "/{patient_id}/reminders/{reminder_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Cancel a reminder",
+    dependencies=[Depends(require_patient_access)],
 )
 def cancel_reminder(
     patient_id: uuid.UUID,

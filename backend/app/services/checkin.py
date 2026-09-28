@@ -41,7 +41,10 @@ class CheckInService:
             )
 
     def get_checkin(self, checkin_id: uuid.UUID) -> CheckIn:
-        checkin = self._repo.get_by_id(checkin_id)
+        # `get_legacy_by_id`, not `get_by_id`: a structured Phase 6 row is not
+        # a Phase 1 check-in, and this response schema requires prose, so
+        # returning one would 500 instead of answering 404.
+        checkin = self._repo.get_legacy_by_id(checkin_id)
         if checkin is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

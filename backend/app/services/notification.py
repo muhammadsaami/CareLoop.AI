@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.exceptions import (
+    EscalationNotNotifiableError,
     NotificationNotFoundError,
     NotificationPermanentError,
     NotificationProviderError,
@@ -32,6 +33,7 @@ from app.core.exceptions import (
 from app.core.redaction import redact_secrets
 from app.core.timezones import ensure_aware, to_local, utcnow
 from app.models.appointment import Appointment
+from app.models.escalation import Escalation, EscalationStatus
 from app.models.medication import Medication
 from app.models.notification import (
     DeliveryChannel,
@@ -91,6 +93,27 @@ class NotificationService:
         normalised = ensure_aware(occurrence_at, field="occurrence_at")
         return f"{reminder_id}:{normalised.isoformat()}:{channel.value}"
 
+    @staticmethod
+    def build_escalation_idempotency_key(
+        escalation_id: uuid.UUID,
+        channel: DeliveryChannel,
+    ) -> str:
+        """
+        The key that makes a caregiver escalation notice send exactly once.
+
+        Derived from the escalation and the transport only.  There is no
+        occurrence and no attempt number, for the same reason the reminder key
+        omits the attempt: a retry MUST recompute the identical key, or the
+        uniqueness constraint stops protecting anything and a retried escalation
+        alerts the caregiver twice about one event.
+
+        Prefixed with `escalation:` rather than reusing the bare reminder shape,
+        so an escalation key can never collide with a reminder key - they are
+        different UUIDs drawn from the same sequence, and a collision would
+        silently suppress a real notification.
+        """
+        return f"escalation:{escalation_id}:{channel.value}"
+
     def materialize(
         self,
         reminder: Reminder,
@@ -122,6 +145,64 @@ class NotificationService:
             attempt_count=0,
             body=self._render_body(reminder),
             recipient=self._resolve_recipient(reminder.patient_id),
+            idempotency_key=key,
+        )
+        return self._repo.materialize_if_absent(candidate)
+
+    # ── Phase 6: caregiver escalation notices ────────────────────────────────
+    def materialize_escalation(
+        self,
+        escalation: Escalation,
+        *,
+        caregiver_contact: str,
+        patient_timezone: Optional[str] = None,
+    ) -> tuple[Notification, bool]:
+        """
+        Create the caregiver notification for one escalation, if it is new.
+
+        Reuses the Phase 5 delivery pipeline - same repository, same state
+        machine, same retry policy, same provider - rather than opening a
+        second delivery path that would need its own retries and its own
+        history view.  The only Phase 6 additions are the idempotency key, the
+        body, and the recipient rule below.
+
+        Returns `(notification, created)`.  `created=False` means this
+        escalation was already notified and must not be delivered again.
+
+        THE RECIPIENT IS EXPLICIT AND NON-NEGOTIABLE
+        `caregiver_contact` is a required argument, and there is no fallback to
+        the patient's own number.  Phase 5's reminder path may fall back, and
+        rightly so: a medication reminder nobody can receive is not a
+        reminder.  An escalation notice is different - it is a clinical alert
+        about a patient, and sending it to the patient would disclose to them
+        that the system has flagged them for a care team to look at, before any
+        human has decided whether that is the right thing to have done.  So a
+        missing caregiver contact raises `EscalationNotNotifiableError` and the
+        caller parks the escalation instead of improvising a recipient.
+        """
+        recipient = (caregiver_contact or "").strip()
+        if not recipient:
+            raise EscalationNotNotifiableError()
+
+        channel = self._channel()
+        key = self.build_escalation_idempotency_key(escalation.id, channel)
+
+        candidate = Notification(
+            patient_id=escalation.patient_id,
+            escalation_id=escalation.id,
+            notification_type=NotificationType.escalation_notice,
+            # `scheduled_for` is the moment the escalation was raised, not now:
+            # the notice is about an event, and deriving the key from a
+            # re-computed "now" would let a retried run create a second row.
+            scheduled_for=ensure_aware(
+                escalation.created_at, field="escalation.created_at"
+            ),
+            timezone=patient_timezone,
+            status=NotificationStatus.pending,
+            channel=channel,
+            attempt_count=0,
+            body=self._render_escalation_body(escalation),
+            recipient=recipient,
             idempotency_key=key,
         )
         return self._repo.materialize_if_absent(candidate)
@@ -171,6 +252,7 @@ class NotificationService:
             next_retry_at=None,
             last_error=None,
         )
+        self._mark_escalation_notified(updated)
         self._db.commit()
         logger.info(
             "notification_sent notification_id=%s attempt=%d channel=%s",
@@ -179,6 +261,44 @@ class NotificationService:
             notification.channel.value,
         )
         return updated
+
+    def _mark_escalation_notified(self, notification: Notification) -> None:
+        """
+        Move a pending escalation to `notified` once its notice actually went.
+
+        The escalation's status column means "the caregiver was reached", and
+        the delivery outcome is the only place that fact is ever known -
+        `EscalationService` materialises the row, which is an intention, not a
+        fact.  So the write belongs here.
+
+        This coupling is one-way on purpose.  `EscalationService` already depends
+        on this service; having this service reach back into `EscalationService`
+        would be a cycle, and the state machine would then be readable from two
+        places at once.  Instead this touches the row directly and reuses
+        `ALLOWED_TRANSITIONS`' forward step.
+
+        It matters more than it looks: `acknowledge` only accepts `notified`.
+        Without this, a caregiver who HAS been told would be recorded as still
+        `pending` forever, could never be acknowledged, and the operator view
+        would show an outstanding alert that does not exist.
+
+        Only `pending` moves.  A human who acknowledged or cancelled between
+        materialisation and delivery has already decided something more
+        important than a status column, and a late-arriving delivery receipt
+        must not overwrite it.
+        """
+        if notification.escalation_id is None:
+            return
+        escalation = self._db.get(Escalation, notification.escalation_id)
+        if escalation is None or escalation.status != EscalationStatus.pending:
+            return
+        escalation.status = EscalationStatus.notified
+        escalation.notified_at = notification.sent_at or utcnow()
+        logger.info(
+            "escalation_notified escalation_id=%s notification_id=%s",
+            escalation.id,
+            notification.id,
+        )
 
     def _record_failure(
         self,
@@ -329,7 +449,34 @@ class NotificationService:
         """
         if reminder.reminder_type == ReminderType.medication:
             return self._render_medication_body(reminder)
+        if reminder.reminder_type == ReminderType.checkin:
+            return self._render_checkin_body(reminder)
         return self._render_appointment_body(reminder)
+
+    @staticmethod
+    def _render_checkin_body(reminder: Reminder) -> str:
+        """
+        The daily check-in prompt.
+
+        Deliberately the emptiest message the service sends.  It reads nothing
+        from the patient's record except the prompt time, which is already on
+        the reminder, and it names no condition, no symptom, and no severity.
+
+        That restraint is the point rather than an oversight. The purpose of
+        this message is to ask a question, and a patient who is sent "your
+        breathlessness is being monitored" learns something alarming from a
+        notification that is supposed to be routine - and learns it before any
+        rule has evaluated an answer, or anything has actually changed.  The
+        prompt is therefore constant, and everything conditional happens after
+        the patient answers.
+        """
+        parts = ["Daily check-in: how are you feeling today?"]
+        if reminder.local_time is not None:
+            parts.append(
+                f"Your daily check-in is set for "
+                f"{reminder.local_time.strftime('%H:%M')}."
+            )
+        return " ".join(parts)
 
     def _render_medication_body(self, reminder: Reminder) -> str:
         parts = ["Medication reminder"]
@@ -366,6 +513,60 @@ class NotificationService:
             parts.append(
                 f"(starts in {reminder.lead_time_minutes} minutes)"
             )
+        return " ".join(parts)
+
+    def _render_escalation_body(self, escalation: Escalation) -> str:
+        """
+        Build the caregiver alert from the escalation's audit fields only.
+
+        WHAT IS INCLUDED, and why each item is safe: the check-in date, the
+        rule code and version that fired, the workflow the deployment
+        configured, and the severity label copied from the stored
+        `WarningSymptom` row.  All four are already in the database before
+        this method runs, and all four are what makes the alert actionable
+        without a human having to guess why it fired.
+
+        WHAT IS EXCLUDED, and why each exclusion is load-bearing:
+
+          * The patient's answers.  This system holds coded values, but a row
+            of them is still the patient's account of their own body, and the
+            caregiver's job is to review the record - not to be handed a
+            summary that reads like an assessment.
+          * The `WarningSymptom` description.  That is text extracted from a
+            discharge document, so quoting it risks putting a document excerpt
+            in front of someone who is not the care team.  The caregiver can
+            open the record; the alert only says which rule fired.
+          * Any severity this system derived.  Nothing here ranks or combines
+            symptoms.  A label appears only because a human wrote it on the
+            warning-symptom row.
+          * Any clinical instruction.  No "seek emergency care", no advice,
+            no condition name.  The workflow is reported as a category, not as
+            a recommendation, and the closing line says plainly that the
+            message is not an assessment - so a caregiver who receives this
+            cannot mistake it for a clinical opinion from the system.
+
+        The body is stored on the notification row and sent, never logged: the
+        delivery log lines in this service record ids and attempt counts only.
+        """
+        parts = [
+            "CareLoop alert: a daily check-in matched a configured "
+            "review rule.",
+        ]
+        checkin = escalation.checkin
+        if checkin is not None:
+            parts.append(f"Check-in date: {checkin.date.isoformat()}.")
+        parts.append(
+            f"Rule: {escalation.rule_code} (rule set "
+            f"{escalation.rule_version})."
+        )
+        if escalation.severity:
+            # The STORED label, not a computed grade.
+            parts.append(f"Documented severity: {escalation.severity}.")
+        parts.append(f"Configured workflow: {escalation.workflow.value}.")
+        parts.append(
+            "Open the CareLoop record to review. This is an automated "
+            "notification, not a clinical assessment."
+        )
         return " ".join(parts)
 
     def _resolve_recipient(self, patient_id: uuid.UUID) -> str:
@@ -407,4 +608,6 @@ class NotificationService:
     def _notification_type(reminder: Reminder) -> NotificationType:
         if reminder.reminder_type == ReminderType.medication:
             return NotificationType.medication_reminder
+        if reminder.reminder_type == ReminderType.checkin:
+            return NotificationType.checkin_prompt
         return NotificationType.appointment_reminder

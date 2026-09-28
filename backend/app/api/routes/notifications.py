@@ -9,8 +9,9 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from app.api.auth_deps import require_patient_access, require_system_access
 from app.api.deps import (
     NotificationServiceDep,
     ReminderServiceDep,
@@ -31,6 +32,7 @@ router = APIRouter(tags=["notifications"])
     "/patients/{patient_id}/notifications",
     response_model=NotificationListResponse,
     summary="Notification history for a patient",
+    dependencies=[Depends(require_patient_access)],
 )
 def notification_history(
     patient_id: uuid.UUID,
@@ -68,6 +70,7 @@ def notification_history(
     "/patients/{patient_id}/reminders/{reminder_id}/notifications",
     response_model=NotificationListResponse,
     summary="Delivery history for one reminder",
+    dependencies=[Depends(require_patient_access)],
 )
 def reminder_history(
     patient_id: uuid.UUID,
@@ -109,6 +112,7 @@ def reminder_history(
     "/notifications/{notification_id}",
     response_model=NotificationResponse,
     summary="Fetch one notification record",
+    dependencies=[Depends(require_patient_access)],
 )
 def get_notification(
     notification_id: uuid.UUID,
@@ -122,6 +126,7 @@ def get_notification(
     "/notifications/dispatch",
     response_model=DispatchResult,
     summary="Run a due-reminder scan now",
+    dependencies=[Depends(require_system_access)],
 )
 def dispatch_due_reminders(
     payload: DispatchRequest,
@@ -145,6 +150,7 @@ def dispatch_due_reminders(
 @router.post(
     "/notifications/retry",
     summary="Retry notifications whose backoff has elapsed",
+    dependencies=[Depends(require_system_access)],
 )
 def retry_notifications(
     service: NotificationServiceDep,

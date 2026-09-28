@@ -56,7 +56,17 @@ chroma/
 # Local semantic embedding model (Phase 3) — ~127 MB of ONNX weights fetched
 # once via `python -m app.rag.embeddings.fetch_model`.  Mirrors
 # RAG_SEMANTIC_MODEL_DIR.  Weights are a build artifact, not source.
-models/
+#
+# ROOTED (/models/), not bare (models/).  A bare pattern matches at ANY depth,
+# so it also swallowed `app/models/` - the ORM package - which silently hid
+# four source files from every commit: notification.py and reminder.py (Phase
+# 5, already missing from HEAD), escalation.py (Phase 6), and user.py (the
+# authentication principal and patient_access grant).  The leading slash anchors
+# this to backend/models/ and nowhere else.
+#
+# The slash must not be dropped: `git status` is the only place this failure is
+# visible, and a commit would omit the files without complaint.
+/models/
 
 # Distribution / packaging
 *.egg

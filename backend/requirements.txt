@@ -15,6 +15,25 @@ pydantic==2.10.3
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
 
+# Authentication
+#
+# PyJWT signs and verifies the access token.  Pinned exactly because the
+# algorithm allow-list in `app.core.security` is only as strong as the library
+# that honours it, and a major bump is where that behaviour changes.  The
+# verifier pins `algorithms=["HS256"]`, so the `alg: none` bypass class is
+# closed regardless of what the token's own header claims.
+#
+# bcrypt hashes passwords directly.  Pinned because its 72-BYTE input limit is
+# silent - it discards the remainder rather than failing - so `app.core.security`
+# rejects over-long passwords itself.  A bcrypt bump could change that
+# behaviour, which is the one thing here that is load-bearing for correctness.
+#
+# `passlib` is present only because it is a transitive dependency of other
+# pinned packages; `app.core.security` calls bcrypt directly and does not use
+# passlib, so its version is deliberately NOT pinned here.
+PyJWT==2.13.0
+bcrypt==4.3.0
+
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0

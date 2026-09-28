@@ -48,10 +48,24 @@ def test_get_patient_by_id(client, sample_patient):
 
 
 def test_get_patient_not_found(client):
+    """
+    An ungranted caller gets 403, not 404, for an id that does not exist.
+
+    This is a deliberate change from the pre-authorization behaviour, and it is
+    the point of the design: a 404 here would tell the caller whether the id
+    names a real patient, turning `GET /patients/{id}` into an oracle for
+    confirming that a given person is a patient of this practice. The grant
+    lookup never touches the `patients` table, so "no such patient" and "not
+    your patient" are indistinguishable - which is exactly what must be true.
+
+    A 404 is therefore unreachable on this route, and that is intended. It
+    remains reachable on resource-keyed routes, where the caller already holds
+    the resource id; see `tests/test_security_authorization.py`.
+    """
     random_id = str(uuid.uuid4())
     response = client.get(f"/api/v1/patients/{random_id}")
-    assert response.status_code == 404
-    assert response.json()["detail"] == "Patient not found"
+    assert response.status_code == 403
+    assert "not authorized" in response.json()["detail"].lower()
 
 
 def test_update_patient(client, sample_patient):
@@ -70,9 +84,10 @@ def test_update_patient(client, sample_patient):
 
 
 def test_update_patient_not_found(client):
+    """Same reasoning as `test_get_patient_not_found`: 403, never 404."""
     random_id = str(uuid.uuid4())
     response = client.patch(f"/api/v1/patients/{random_id}", json={"name": "No One"})
-    assert response.status_code == 404
+    assert response.status_code == 403
 
 
 def test_delete_patient(client, sample_patient):
@@ -80,15 +95,20 @@ def test_delete_patient(client, sample_patient):
     response = client.delete(f"/api/v1/patients/{patient_id}")
     assert response.status_code == 204
 
-    # Verify patient is gone
+    # Verify the row is gone.  The grant was removed by the foreign key's
+    # ON DELETE CASCADE, so the follow-up read is refused at the authorization
+    # layer (403) rather than reaching the service (which would have 404'd).
+    # The cascade is worth asserting on: a grant that outlived its patient
+    # would leave a dangling authorization row behind.
     get_res = client.get(f"/api/v1/patients/{patient_id}")
-    assert get_res.status_code == 404
+    assert get_res.status_code == 403
 
 
 def test_delete_patient_not_found(client):
+    """Same reasoning as `test_get_patient_not_found`: 403, never 404."""
     random_id = str(uuid.uuid4())
     response = client.delete(f"/api/v1/patients/{random_id}")
-    assert response.status_code == 404
+    assert response.status_code == 403
 
 
 def test_delete_patient_with_records_conflict(client, sample_patient):

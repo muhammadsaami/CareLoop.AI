@@ -335,7 +335,7 @@ class TestReminderLifecycle:
         assert resumed.json()["next_occurrence_at"] is not None
 
     def test_paused_reminder_is_never_dispatched(
-        self, notification_client, db_session
+        self, operator_notification_client, db_session
     ):
         """
         The real guarantee behind `paused`.  A paused rule with a due instant
@@ -343,9 +343,9 @@ class TestReminderLifecycle:
         """
         from sqlalchemy import text
 
-        patient = _patient(notification_client, name="Paused", suffix="3031")
-        medication = _medication(notification_client, patient["id"])
-        reminder = notification_client.post(
+        patient = _patient(operator_notification_client, name="Paused", suffix="3031")
+        medication = _medication(operator_notification_client, patient["id"])
+        reminder = operator_notification_client.post(
             f"/api/v1/patients/{patient['id']}/reminders/medication",
             json={"medication_id": medication["id"], "times": ["08:00"]},
         ).json()[0]
@@ -356,18 +356,18 @@ class TestReminderLifecycle:
         )
         db_session.commit()
 
-        paused = notification_client.patch(
+        paused = operator_notification_client.patch(
             f"/api/v1/patients/{patient['id']}/reminders/{reminder['id']}",
             json={"status": "paused"},
         )
         assert paused.status_code == 200
 
-        result = notification_client.post(
+        result = operator_notification_client.post(
             "/api/v1/notifications/dispatch", json={}
         ).json()
         assert result["scanned"] == 0
         assert result["materialized"] == 0
-        assert notification_client.get(
+        assert operator_notification_client.get(
             f"/api/v1/patients/{patient['id']}/notifications"
         ).json()["count"] == 0
 
@@ -515,37 +515,37 @@ class TestNotificationEndpoints:
         db_session.commit()
         return patient, reminder
 
-    def test_manual_dispatch_is_idempotent(self, notification_client, db_session):
-        patient, reminder = self._due_reminder(notification_client, db_session)
+    def test_manual_dispatch_is_idempotent(self, operator_notification_client, db_session):
+        patient, reminder = self._due_reminder(operator_notification_client, db_session)
 
-        first = notification_client.post(
+        first = operator_notification_client.post(
             "/api/v1/notifications/dispatch", json={}
         )
         assert first.status_code == 200, first.text
         assert first.json()["materialized"] == 1
 
-        second = notification_client.post(
+        second = operator_notification_client.post(
             "/api/v1/notifications/dispatch", json={}
         )
         assert second.status_code == 200
         assert second.json()["materialized"] == 0
 
-        history = notification_client.get(
+        history = operator_notification_client.get(
             f"/api/v1/patients/{patient['id']}/notifications"
         ).json()
         assert history["count"] == 1
 
-    def test_history_exposes_the_rendered_body(self, notification_client, db_session):
+    def test_history_exposes_the_rendered_body(self, operator_notification_client, db_session):
         """
         The history is the record of what the patient was actually told, so the
         body belongs in it.  It must stay free of document and extraction text.
         """
         patient, reminder = self._due_reminder(
-            notification_client, db_session, suffix="3051"
+            operator_notification_client, db_session, suffix="3051"
         )
-        notification_client.post("/api/v1/notifications/dispatch", json={})
+        operator_notification_client.post("/api/v1/notifications/dispatch", json={})
 
-        history = notification_client.get(
+        history = operator_notification_client.get(
             f"/api/v1/patients/{patient['id']}/notifications"
         ).json()
         entry = history["notifications"][0]
@@ -555,25 +555,25 @@ class TestNotificationEndpoints:
         # No clinical source text beyond the schedule itself.
         assert "discharge" not in entry["body"].lower()
 
-    def test_history_paginates_and_filters(self, notification_client, db_session):
+    def test_history_paginates_and_filters(self, operator_notification_client, db_session):
         patient, reminder = self._due_reminder(
-            notification_client, db_session, suffix="3052"
+            operator_notification_client, db_session, suffix="3052"
         )
-        notification_client.post("/api/v1/notifications/dispatch", json={})
+        operator_notification_client.post("/api/v1/notifications/dispatch", json={})
 
-        page = notification_client.get(
+        page = operator_notification_client.get(
             f"/api/v1/patients/{patient['id']}/notifications?skip=0&limit=1"
         ).json()
         assert page["count"] == 1
         assert page["limit"] == 1
 
-        failed = notification_client.get(
+        failed = operator_notification_client.get(
             f"/api/v1/patients/{patient['id']}/notifications?status=failed"
         ).json()
         assert failed["notifications"] == []
 
-    def test_retry_endpoint_returns_counts(self, notification_client):
-        response = notification_client.post(
+    def test_retry_endpoint_returns_counts(self, operator_notification_client):
+        response = operator_notification_client.post(
             "/api/v1/notifications/retry?limit=10"
         )
         assert response.status_code == 200
@@ -587,8 +587,8 @@ class TestNotificationEndpoints:
         )
         assert response.status_code == 404
 
-    def test_dispatch_rejects_an_absurd_limit(self, notification_client):
-        response = notification_client.post(
+    def test_dispatch_rejects_an_absurd_limit(self, operator_notification_client):
+        response = operator_notification_client.post(
             "/api/v1/notifications/dispatch", json={"limit": 100000}
         )
         assert response.status_code == 422

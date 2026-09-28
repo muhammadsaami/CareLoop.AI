@@ -282,11 +282,20 @@ def test_no_database_migration_was_added_for_phase4():
     """
     Phase 4 is stateless, so it must not have altered the schema.
 
-    The agent creates no tables of its own.  This used to assert exactly two
-    migrations, which is now wrong for the right reason: Phase 5 legitimately
-    added a third (reminders/notifications).  The guard is restated in terms of
-    what it actually protects - no migration introduces an agent-owned table,
-    and the revision chain stays linear with Phase 4 not appearing in it.
+    The agent creates no tables of its own.  This used to assert a migration
+    COUNT, which was wrong for the right reason every time another phase landed:
+    Phase 5 added reminders/notifications, Phase 6 added two, and
+    authentication added one.  A count encodes "how many phases so far" and so
+    fails on the next legitimate migration - including the security migration,
+    which has nothing to do with the agent.
+
+    What this actually protects is stated directly instead, and in two parts:
+
+    1. No migration creates or alters an agent-owned table.
+    2. No migration is attributable to Phase 4 at all, by slug.
+
+    Together those are the real invariant. Anything else would be a tripwire
+    wired to the wrong thing.
     """
     import os
     import re
@@ -298,10 +307,7 @@ def test_no_database_migration_was_added_for_phase4():
     files = sorted(
         f for f in os.listdir(versions) if f.endswith(".py")
     )
-
-    # Phase 1 created the schema, Phase 2 added discharge documents, Phase 5
-    # added scheduling.  Phase 4 contributed none.
-    assert len(files) == 3, f"unexpected migration count: {files}"
+    assert files, "no migrations found at all"
 
     # No migration may create a table owned by the agent layer.
     agent_tables = {"agent_runs", "agent_messages", "checkpoints", "agent_state"}
@@ -310,6 +316,19 @@ def test_no_database_migration_was_added_for_phase4():
             body = handle.read()
         assert not (agent_tables & set(re.findall(r'create_table\(\s*"(\w+)"', body))), (
             f"{name} creates an agent-owned table"
+        )
+
+    # No migration is attributable to Phase 4. Slug-matching is coarse on
+    # purpose: it would flag a file named `..._phase_4_...` even if its content
+    # turned out to be innocent, and that is the right direction to err in for
+    # a guard whose whole job is to make someone look twice.
+    for name in files:
+        slug = name.lower()
+        assert "phase_4" not in slug and "phase4" not in slug, (
+            f"{name} looks like a Phase 4 migration, but Phase 4 is stateless"
+        )
+        assert "agent" not in slug, (
+            f"{name} looks like an agent migration, but the agent is stateless"
         )
 
     # The chain must be linear: each migration declares exactly one down_revision.

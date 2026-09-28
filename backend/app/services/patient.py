@@ -5,7 +5,7 @@ Contains application-level operations for patients.
 from __future__ import annotations
 
 import uuid
-from typing import List
+from typing import Collection, List, Optional
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -46,8 +46,23 @@ class PatientService:
             )
         return patient
 
-    def list_patients(self, skip: int = 0, limit: int = 100) -> List[Patient]:
-        return self._repo.list_all(skip=skip, limit=limit)
+    def list_patients(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        patient_ids: Optional[Collection[uuid.UUID]] = None,
+    ) -> List[Patient]:
+        """
+        List patients, optionally restricted to the caller's authorized set.
+
+        `patient_ids=None` means unrestricted and exists for internal callers
+        (Celery tasks, tests). The HTTP route always passes an explicit set -
+        see `app.api.routes.patients.list_patients` - so there is no code path
+        where an authenticated user reaches this method unscoped.
+        """
+        return self._repo.list_all(
+            skip=skip, limit=limit, patient_ids=patient_ids
+        )
 
     def update_patient(self, patient_id: uuid.UUID, data: PatientUpdate) -> Patient:
         patient = self.get_patient(patient_id)

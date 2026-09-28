@@ -6,8 +6,9 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Depends, status
 
+from app.api.auth_deps import require_patient_access
 from app.api.deps import DbSession
 from app.schemas.adherence_log import AdherenceLogCreate, AdherenceLogResponse, AdherenceLogUpdate
 from app.services.adherence import AdherenceService
@@ -24,6 +25,7 @@ router = APIRouter(tags=["Adherence"])
         404: {"description": "Patient or medication not found"},
         400: {"description": "Medication does not belong to this patient"},
     },
+    dependencies=[Depends(require_patient_access)],
 )
 def create_adherence_log(
     patient_id: uuid.UUID, data: AdherenceLogCreate, db: DbSession
@@ -37,6 +39,7 @@ def create_adherence_log(
     response_model=List[AdherenceLogResponse],
     summary="List adherence logs for a patient",
     responses={404: {"description": "Patient not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def list_adherence_logs(patient_id: uuid.UUID, db: DbSession) -> List[AdherenceLogResponse]:
     return AdherenceService(db).list_logs(patient_id)
@@ -47,6 +50,7 @@ def list_adherence_logs(patient_id: uuid.UUID, db: DbSession) -> List[AdherenceL
     response_model=AdherenceLogResponse,
     summary="Update an adherence log (mark as taken)",
     responses={404: {"description": "Adherence log not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def update_adherence_log(
     adherence_id: uuid.UUID, data: AdherenceLogUpdate, db: DbSession

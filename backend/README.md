@@ -6,12 +6,222 @@
 ---
 
 ## Current Phase
-**Phase 5 — Scheduling and Notifications (complete)**
+**Phase 6 — Daily Check-ins and Safe Escalation (complete)**, plus
+authentication and patient-level authorization across the whole surface: see
+[Authentication and Authorization](#authentication-and-authorization). Every
+route except the two health probes requires a signed bearer token, and every
+patient-scoped route requires a per-patient grant. That closed the gap earlier
+phases documented - they scoped rows correctly, but had no identity to scope
+*for*.
 
-Phase 1–4 (listed below) remain fully supported and their tests still pass.
-Phase 5 is strictly **additive**: no existing behaviour was changed. The one
-migration it adds is the third in the chain, and it creates new tables plus one
-nullable column (`patients.timezone`).
+Phase 1–5 (listed below) remain fully supported and their tests still pass.
+Phase 6 is strictly **additive** to check-ins: the free-text check-ins from
+Phase 1 keep their exact behaviour, and the new structured check-ins live
+alongside them in the same table rather than replacing them. The two migrations
+it adds are fourth and fifth in the chain.
+
+### Phase 6 — Daily Check-ins and Safe Escalation
+
+A patient answers a small, **coded** set of questions about their own
+documented warning symptoms. Two published rules read those answers and may
+raise an escalation for a human to look at. Nothing infers a symptom the
+patient did not select, and nothing sends anything by default.
+
+#### Two shapes of check-in, one table
+
+`checkins` now holds both record types, told apart by `responses`:
+
+| | `response_text` (Phase 1) | `responses` (Phase 6) |
+| --- | --- | --- |
+| Shape | free text, `flagged`, `flag_reason` | JSON of coded answers |
+| Nullability | `response_text` became **nullable** | `responses` nullable |
+| Which endpoints see it | `GET /checkins`, `GET /checkins/{id}` | everything under `/checkins/daily` |
+| What can escalate it | nothing, ever | the two published rules |
+
+A structured row always has `responses` set and `response_text` null; a legacy
+row always has `response_text` set and `responses` null. The repository filters
+on that discriminator in both directions, so a Phase 1 client listing check-ins
+never sees a structured blob it cannot render, and the Phase 6 history endpoint
+never returns a legacy row with `responses: null` that looks like a failed
+evaluation.
+
+Both shapes share **one** unique constraint on `(patient_id, date)`. A patient
+can have exactly one check-in per day regardless of which endpoint recorded it,
+which is the property the daily check-in actually depends on.
+
+#### Answers are codes, and the codes are checked against this patient
+
+A submission looks like this — no free text field exists:
+
+```json
+{
+  "date": "2026-09-28",
+  "general_wellbeing": "okay",
+  "condition_change": "same",
+  "warning_symptoms": [
+    {"symptom_id": "<uuid from /checkins/questions>", "change": "worse"}
+  ]
+}
+```
+
+`symptom_id` is **not** a free reference. Every id is looked up with a patient
+filter before it can reach the evaluator, so an id belonging to another patient
+is indistinguishable from one that does not exist. This is the single most
+important line of defence in the phase, and it is structural: `build_reports()`
+only accepts ids found in a mapping the caller loaded *with a patient filter*,
+so there is no code path that hands an unverified id to a rule.
+
+The evaluator is a pure function of `(stored facts, config)` — no clock, no
+model, no network. Two submissions with the same answers produce the same
+escalations in the same order, which is what makes the `(checkin_id,
+rule_code)` idempotency constraint meaningful rather than decorative.
+
+#### The published rules
+
+Both rules are anchored on warning symptoms the patient **already has on
+record** from their discharge instructions. Neither fires on a symptom the
+patient does not have, and neither reads free text.
+
+| Rule code | Category | Fires when | Floor |
+| --- | --- | --- | --- |
+| `WARNING_SYMPTOM_WORSENED` | `warning_criteria_changed` | A documented symptom is reported `worse` | **Ignored** — always `low` |
+| `WARNING_SYMPTOM_AT_SEVERITY_FLOOR` | `warning_criteria_present` | A documented symptom is reported `worse`, `same`, or `better`, at or above the floor | Honours `CHECKIN_SEVERITY_FLOOR` |
+
+Both are versioned (`checkin-red-flags-v1`) and the version is stored on every
+escalation row alongside the rule code, so an audit can be replayed against the
+exact rule set that produced it.
+
+#### The severity floor is asymmetric, on purpose
+
+`CHECKIN_SEVERITY_FLOOR` can be **raised** above what a rule declares, making
+that rule stricter. It can never be lowered, because configuration must not be
+able to invent a clinical rule more sensitive than the one that was reviewed.
+
+It applies to the floor rule **only**. A worsening is a change over time, not an
+absolute severity, so `honours_deployment_floor=False` keeps it firing at every
+documented severity. Without that exemption,
+`CHECKIN_SEVERITY_FLOOR=critical` would silence worsening alerts for every
+documented symptom below critical — including a high-severity symptom that got
+worse. A clinical signal would disappear silently, in the direction nobody is
+watching, because a configuration knob was turned. The exemption is declared
+per rule rather than special-cased in the evaluator, so the published set reads
+in one place and a new rule must make the choice explicitly.
+
+#### Unevaluable is not safe
+
+`needs_review` is recorded independently of escalation, because a check-in can
+both escalate and need review, and collapsing the two would lose a fact.
+
+| Review code | Meaning |
+| --- | --- |
+| `unmapped_distress` | Patient said `unwell` / `very_unwell` / `worse` but selected no warning symptom. There is nothing to match, and this is **not** "safe". |
+| `unrecognised_warning_symptom` | A symptom id is not one of this patient's. Dropped from evaluation, not guessed at. |
+| `unknown_symptom_severity` | A stored severity cannot be ranked, so the floor cannot be applied. Skipped, not guessed low. |
+| `incomplete_responses` | The answer set was empty. |
+
+`unmapped_distress` is the case the phase is most careful about: the patient may
+be telling us something is wrong and we have no documented criterion to compare
+it against. Rounding that to either "safe" or "escalated" would be inventing a
+clinical judgement, so it is handed to a human.
+
+#### Escalation lifecycle
+
+```
+pending ──delivery succeeds──► notified ──human──► acknowledged ──► resolved
+   └────────────human──────► cancelled (should not have been raised)
+```
+
+Transitions are one-way and refuse to go backwards
+(`EscalationTransitionError`, `409`). The automatic `pending → notified` edge is
+the only one the system takes by itself, and it happens on confirmed delivery —
+never on materialising a notification, because a row in the outbox is not a
+message somebody received.
+
+That is also why `acknowledge` is **not** reachable from `pending`: it means "a
+human has seen that this was communicated", which is not true until the notice
+has gone out. On an escalation nobody has been notified about yet, the only
+human action available is `cancel`.
+
+A late retry therefore cannot overwrite a human decision: if a caregiver
+notice finally delivers after a clinician has already `resolved` the
+escalation, the status stays `resolved` and only `notified_at` moves.
+
+#### Caregiver notification is opt-in, and has no fallback
+
+Notifications are requested only when **both** `CHECKIN_ESCALATION_ENABLED` and
+`CHECKIN_NOTIFY_CAREGIVER` are on, and are delivered through the **existing**
+Phase 5 pipeline — same outbox, same providers, same retry budget. Phase 6 adds
+no second send path, because two would mean two retry policies and two places
+for a duplicate caregiver alert to be born.
+
+The recipient is `Patient.caregiver_contact` and nothing else. If that field is
+empty the escalation is **still created and still reviewable in the API**; it
+records `notification_blocked_reason` and notifies nobody. The patient's own
+number is never substituted, because a caregiver notice and a patient prompt
+are different messages to different people with different consent.
+
+#### Recovery
+
+`careloop.notify_pending_escalations` runs every minute and materialises
+notifications for escalations that have none. It exists for the one case the
+request path cannot cover: a submission that committed an escalation row while
+the outbox write failed, or an operator enabling the pathway after the fact.
+It only **materialises**; delivery stays with Phase 5.
+
+#### Configuration
+
+Every Phase 6 setting is inert by default, so a fresh deployment records and
+evaluates check-ins, creates no escalation, and sends nothing. See
+[`.env.example`](.env.example) for the annotated list.
+
+| Setting | Default | Notes |
+| --- | --- | --- |
+| `CHECKIN_ESCALATION_ENABLED` | `false` | Master switch. Off ⇒ record and evaluate, never act. |
+| `CHECKIN_NOTIFY_CAREGIVER` | `false` | Separate from the master switch: a notice discloses to a third party. Enabling it while the pathway is off is a startup error. |
+| `CHECKIN_PROMPT_LOCAL_TIME` | `09:00` | Naive local time — the prompt is sent in the **patient's** timezone from the patient record, so one global setting cannot get it wrong. |
+| `CHECKIN_ENABLED_RULES` | blank | Blank means *all published rules*, not none. An unknown code is a startup error, so a typo can never read as "no rules active". |
+| `CHECKIN_SEVERITY_FLOOR` | `low` | Raise only. Applies to the floor rule only — see above. |
+| `CHECKIN_MAX_SYMPTOM_REPORTS` | `20` | Bounded 1–200; the answers are JSON in a clinical record. |
+
+#### Endpoints
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/patients/{id}/checkins/questions` | Question set + this patient's warning symptoms |
+| `POST` | `/patients/{id}/checkins/daily` | Submit today's structured check-in and evaluate it |
+| `GET` | `/patients/{id}/checkins/daily/latest` | Most recent structured check-in |
+| `GET` | `/patients/{id}/checkins/daily/{id}` | One structured check-in |
+| `GET` | `/patients/{id}/checkins/daily` | Paged history, `skip`/`limit` |
+| `POST` | `/patients/{id}/checkins/schedule` | Set up (or fetch) the daily prompt reminder |
+| `GET` | `/patients/{id}/escalations` | Newest first; `status`, `skip`, `limit` |
+| `GET` | `/patients/{id}/escalations/{id}` | One escalation |
+| `POST` | `/patients/{id}/escalations/{id}/acknowledge` | Human has seen it |
+| `POST` | `/patients/{id}/escalations/{id}/resolve` | Close it out, with an optional note |
+| `POST` | `/patients/{id}/escalations/{id}/cancel` | It should not have been raised |
+
+Submitting twice for one date returns `CheckInAlreadySubmittedError`
+(`409`), including when two requests race and the database — not the
+application — is what rejects the second.
+
+#### What Phase 6 does not do
+
+- It does not infer a symptom from free text, and it does not read
+  `response_text` for anything.
+- It does not diagnose, triage, advise, or suggest a treatment or medication
+  change. `patient_message` and notification bodies are fixed strings that name
+  a workflow, never a clinical instruction.
+- It does not escalate a symptom the patient does not have on record.
+- It does not notify anyone by default, and it does not fall back to the
+  patient's own number when no caregiver contact exists.
+- It does not log response text, symptom descriptions, or patient answers.
+  `reason_code` carries the rule code, the rule version, and a severity
+  **label** — nothing else — because that is what ends up in logs.
+- It requires a bearer token and a per-patient grant on every route, and a
+  cross-patient id is refused with `403`. See
+  [Authentication and Authorization](#authentication-and-authorization).
+- It does not capture caregiver consent. `Patient.consent_*` still does not
+  exist, so `CHECKIN_NOTIFY_CAREGIVER` is an operator setting, not a
+  consent record.
 
 ### Phase 5 — Scheduling and Notifications
 
@@ -161,9 +371,9 @@ message a patient. `whatsapp` is opt-in and needs both credentials.
   dose.
 - It does not provide opt-in/opt-out consent capture. `Patient.consent_*` does
   not exist yet, so WhatsApp to a caregiver is a Phase 6 concern.
-- It has no per-tenant authentication. The tenancy checks in the routes scope a
-  reminder to the patient in the path, but there is no identity layer yet, so
-  these endpoints are **not safe to expose publicly** as they stand.
+- Its endpoints require a bearer token and a per-patient grant, as does every
+  other route: see
+  [Authentication and Authorization](#authentication-and-authorization).
 
 ### Phase 4 — LangGraph Grounded Answer Agent
 
@@ -486,6 +696,146 @@ matches.
 
 ---
 
+## Authentication and Authorization
+
+Every endpoint except the two health probes requires a signed bearer token, and
+every patient-scoped route additionally requires a **grant** naming the patient
+the request is about. Before this phase the routes scoped rows correctly but
+had no identity to scope *for*, so anyone who could reach the API could read or
+write any patient's record.
+
+### The model
+
+Two tables, and deliberately not more:
+
+| Table | Meaning |
+|---|---|
+| `app_users` | the authenticated principal. A login, **not** a role. |
+| `patient_access` | the grant: this user may act on this patient. |
+
+There is **no global patient role** - no "nurse" or "admin" that implies access
+to everyone. A grant names one patient. The `relationship` column
+(`self` | `caregiver` | `care_team`) is recorded for audit and for the CLI; all
+three grant exactly the same access, and none of them is a write role.
+
+`relationship` is a `String` with a `CHECK` constraint rather than a PostgreSQL
+enum, so it still holds for a direct `INSERT` from psql or a future service.
+`ux_patient_access_user_patient_active` is a **partial** unique index on
+`(user_id, patient_id) WHERE revoked_at IS NULL`, which both enforces one live
+grant per pair and serves the per-request authorization lookup.
+
+A revoked grant is retained rather than deleted, so `patient_access` is an
+access *history*. Re-granting writes a new row; it never revives the old one.
+
+### Operator rights
+
+`app_users.system_access` is the single global privilege. It guards exactly two
+endpoints - `POST /notifications/dispatch` and `POST /notifications/retry` -
+which walk every patient's rows. It is **off by default**, no patient grant
+substitutes for it, and it is never required by a patient-scoped route. An
+operator can still use the ordinary clinical endpoints; it is a privilege, not
+a different class of user.
+
+### Getting a token
+
+There is no `POST /login` (see Known Limitations). An operator provisions
+access with the CLI, which is the only way to create an account or move a grant:
+
+```powershell
+# Create an account. Omit --password to be prompted, or pipe one line in.
+python -m app.cli.manage_access create-user --email nora@example.com
+
+# Grant it access to one patient.
+python -m app.cli.manage_access grant --email nora@example.com `
+    --patient-id <uuid> --relationship caregiver
+
+# Mint a token for a call.
+python -m app.cli.manage_access mint-token --email nora@example.com
+```
+
+Then:
+
+```powershell
+curl.exe -H "Authorization: Bearer <token>" http://localhost:8000/api/v1/patients
+```
+
+**Account and grant management is deliberately not exposed over HTTP.** A route
+that could mint a grant would let any authenticated caller escalate to reading
+every patient in the system.
+`tests/test_security_routes.py::test_grants_can_only_be_created_by_the_patient_creation_route`
+fails if one is ever added.
+
+The one self-service grant is `POST /patients`, which grants the creator `self`
+access to the patient it just created - otherwise a created patient would be
+unreadable by its own creator. It is safe because the granted id is the one the
+route just minted, never one the caller supplied.
+
+### Error semantics
+
+The two distinctions below are the whole disclosure story, and they run in
+opposite directions on purpose.
+
+| Situation | Status | Why |
+|---|---|---|
+| No / malformed / expired / invalid / deactivated token | `401` | not authenticated |
+| Authenticated, but no grant for a `patient_id` the request names | `403` | authenticated, not permitted |
+| Authenticated, but a `*_id` resource is not theirs | `404` | must not confirm it exists |
+| Malformed UUID in a path | `422` | matches FastAPI's own validation |
+
+A patient-keyed request (`/patients/{patient_id}/...`) is refused `403` without
+the grant lookup ever touching the `patients` table, so a `403` cannot be
+distinguished from a `403` for an id that does not exist. A resource-keyed
+request (`/medications/{medication_id}`) has to read the row to learn its owner,
+so it answers `404` - byte-identical to the response for a nonexistent id.
+
+Every `401` carries `WWW-Authenticate: Bearer realm="careloop", error="invalid_token"`
+and the same body for all nine failure modes (absent, garbage, wrong key,
+malformed sub, unknown user, expired, no expiry, inactive user, truncated
+signature). The specific reason is logged and never returned.
+`tests/test_security_authentication.py` asserts the bodies are *equal*, not
+merely that each is a `401`, because "each is 401" is not the property.
+
+### Public surface
+
+Exactly two routes are unauthenticated:
+
+- `GET /api/v1/health`
+- `GET /api/v1/health/ready`
+
+They must stay free of patient data; `test_public_router_touches_no_patient_data`
+enforces that by checking the health handlers do not reach a model module.
+
+**In production the interactive API docs are disabled** (`/docs`, `/redoc`,
+`/openapi.json` all return 404), so the route table is not published. They
+remain available in development.
+
+### Configuration
+
+| Variable | Default | Notes |
+|---|---|---|
+| `SECRET_KEY` | *required* | >= 32 chars. `openssl rand -hex 32`. Rotating it logs everyone out. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | must be 1-1440; the app refuses to start outside that. |
+
+In production the app also **refuses to start** if `SECRET_KEY` contains a known
+placeholder (`changeme`, `secret`, `password`, `dev`, `test`, ...). That check is
+a substring match, so `please-changeme-please` is caught, and `:` is treated as
+a boundary so a `DATABASE_URL` pasted into the field is caught too. In
+development the check is skipped, so a local `.env` is not blocked from a
+convenient value.
+
+### Deploying this
+
+- Set a real `SECRET_KEY` per environment. A shared key across staging and
+  production means a staging compromise forges production tokens.
+- `/docs` is disabled in production, but that is not access control - it only
+  stops the route table being read. The API is still reachable.
+- Do not treat "the API requires a token" as "the API is safe to expose." There
+  is no login, no refresh, no rate limiting, and no denylist on this phase.
+- Terminate TLS in front of the API. A bearer token is a credential, and one
+  in cleartext over a network is a disclosed credential.
+
+---
+
 ## Requirements
 * **Python**: 3.11+
 * **PostgreSQL**: 15+ (PostgreSQL 17 supported)
@@ -614,6 +964,29 @@ The API will be accessible at:
 - **Interactive Swagger Docs**: `http://127.0.0.1:8000/docs`
 - **ReDoc Documentation**: `http://127.0.0.1:8000/redoc`
 
+> The docs URLs are development-only; in production all three return 404.
+
+### Before running any example below
+
+Every endpoint in the examples that follow except the two health probes needs a
+bearer token, and the `notifications/dispatch` and `notifications/retry` examples
+additionally need an **operator** token. Unauthenticated calls return `401`.
+
+Mint the tokens once, then set `$headers` and pass `-Headers $headers`:
+
+```powershell
+# A caregiver token, and an operator token for the whole-system endpoints.
+$caregiver = python -m app.cli.manage_access mint-token --email nora@example.com
+$operator  = python -m app.cli.manage_access mint-token --email ops@example.com
+
+$headers = @{ Authorization = "Bearer $caregiver" }
+$opHeaders = @{ Authorization = "Bearer $operator" }
+```
+
+The examples below are written as they were before authentication and omit
+`-Headers $headers` for brevity. Add it to each call; `-Headers $opHeaders` for
+the two dispatch/retry calls.
+
 ### Trying the reminder endpoints (Phase 5)
 ```powershell
 # 1. A medication reminder needs EXPLICIT dose times. `frequency` is free text
@@ -637,6 +1010,88 @@ Then start the worker and beat in two more terminals to actually deliver:
 celery -A app.workers.celery_app.celery_app worker --loglevel=INFO
 celery -A app.workers.celery_app.celery_app beat --loglevel=INFO
 ```
+
+### Trying the check-in endpoints (Phase 6)
+```powershell
+# 0. The pathway is INERT by default. With no configuration a submission is
+#    recorded and evaluated but creates no escalation and sends nothing. To see
+#    an escalation in `.env`, set BOTH (setting one without the other is a
+#    startup error):
+#      CHECKIN_ESCALATION_ENABLED=true
+#      CHECKIN_NOTIFY_CAREGIVER=true
+#    NOTIFY also needs Patient.caregiver_contact; without it the escalation is
+#    still created, with notification_blocked_reason recorded.
+
+# 1. What to ask, and this patient's own warning-symptom ids. The ids come from
+#    the question set; a client never invents them.
+$questions = Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/checkins/questions"
+$questions.questions
+$questions.available_warning_symptoms | Select-Object id, severity
+
+# 2. Submit today's check-in. Coded answers only - there is no free-text field.
+#    Use a symptom id from step 1; `absent` and `better` do not match the
+#    worsening rule.
+$body = @{
+  general_wellbeing  = "okay"
+  condition_change   = "same"
+  warning_symptoms   = @(
+    @{ symptom_id = $questions.available_warning_symptoms[0].id
+       change     = "worse" }
+  )
+} | ConvertTo-Json -Depth 5
+
+$checkin = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/checkins/daily" `
+  -ContentType "application/json" -Body $body
+
+# 3. The verdict. `status` is completed | escalated | needs_review, and
+#    `escalations` carries the rule that fired. A second submission for the same
+#    date returns 409, including under a genuine race.
+$checkin.status
+$checkin.needs_review
+$checkin.patient_message        # a fixed sentence, chosen by configured workflow
+$checkin.escalations | Select-Object rule_code, severity, status
+
+# 4. The audit trail, newest first (a plain array). `status` filters the
+#    lifecycle: pending | notified | acknowledged | resolved | cancelled.
+$esc = Invoke-RestMethod `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/escalations?status=pending"
+
+# 5. A human works the queue. NOTE the order: `acknowledge` requires `notified`,
+#    because acknowledging means "a human has seen that this was communicated".
+#    Until the notice actually delivers, the only human action on a `pending`
+#    escalation is `cancel`. So either run the worker first (delivery moves it
+#    pending -> notified), or cancel it here:
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/escalations/$($esc[0].id)/cancel"
+
+#    ...or, once delivered and therefore `notified`:
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/escalations/$($esc[0].id)/acknowledge"
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/patients/$($patient.id)/escalations/$($esc[0].id)/resolve" `
+  -ContentType "application/json" -Body '{"note":"Reviewed; patient contacted."}'
+
+#    Every transition is one-way; `resolved` and `cancelled` are terminal, and
+#    going backwards returns 409 rather than rewriting the audit trail.
+
+# 6. Recovery is automatic, not an endpoint. Submission materialises the
+#    caregiver notification inline, so the recovery task only has to cover the
+#    gaps (a failed outbox write, or enabling the pathway after the fact). It
+#    runs on the beat every minute as `careloop.notify_pending_escalations`;
+#    there is deliberately no HTTP trigger, because a second way in to
+#    escalation notifications is a second place for a duplicate to be born.
+#    Force it by hand against a running worker:
+#      celery -A app.workers.celery_app.celery_app call careloop.notify_pending_escalations
+#
+#    Note that POST /notifications/dispatch is the Phase 5 due-REMINDER scan
+#    only; it does not run escalation recovery.
+```
+
+An escalation is a **flag for a human, not a triage decision**. Nothing in this
+phase pages anyone, and a match is not a diagnosis — see
+[Known Limitations](#known-limitations).
 
 ### Trying the upload endpoint
 ```powershell
@@ -721,11 +1176,13 @@ PostgreSQL
 ```
 
 ### Modules:
-- `app/core/`: Configuration (`config.py`), database engine (`database.py`), logging (`logging.py`), domain exceptions (`exceptions.py`), secret redaction (`redaction.py`), security stubs (`security.py`).
-- `app/models/`: SQLAlchemy 2.x declarative models (`patient`, `medication`, `appointment`, `warning_symptom`, `checkin`, `adherence_log`, `discharge_document`, `extraction_run`).
-- `app/schemas/`: Pydantic v2 schemas (`Create`, `Update`, `Response`, plus the Phase 2 extraction contract).
+- `app/core/`: Configuration (`config.py`), database engine (`database.py`), logging (`logging.py`), domain exceptions (`exceptions.py`), secret redaction (`redaction.py`), password hashing and JWT signing/verification (`security.py`), and the Phase 6 rule vocabulary (`escalation_codes.py`, dependency-free so settings can validate rule codes without importing the model layer).
+- `app/models/`: SQLAlchemy 2.x declarative models (`patient`, `medication`, `appointment`, `warning_symptom`, `checkin`, `escalation`, `adherence_log`, `discharge_document`, `extraction_run`, `notification`, `reminder`, and `user` — the `AppUser` principal and the `PatientAccess` grant).
+- `app/schemas/`: Pydantic v2 schemas (`Create`, `Update`, `Response`, plus the Phase 2 extraction contract and the Phase 6 check-in/escalation contracts).
 - `app/repositories/`: Direct database queries, isolating SQLAlchemy session interactions.
-- `app/services/`: Application workflows, ownership verification, cascading checks, transactions. Phase 2 adds `storage`, `text_processing`, `ocr`, `document_processing`, `extraction`, `safety`, and `discharge_document`.
+- `app/api/auth_deps.py`: the authentication and authorization dependencies every route composes. Kept out of `deps.py` so the two concerns can be read separately.
+- `app/cli/manage_access.py`: operator-only account and grant management. Deliberately not exposed over HTTP.
+- `app/services/`: Application workflows, ownership verification, cascading checks, transactions. Phase 2 adds `storage`, `text_processing`, `ocr`, `document_processing`, `extraction`, `safety`, and `discharge_document`. Phase 5 adds `reminder` and `notification`. Phase 6 adds `checkin_questions`, `daily_checkin`, `red_flag_rules` (the pure evaluator), `escalation`, and `checkin`. Authorization adds `access_control` (the single place a grant decision is made).
 - `app/llm/`: `LLMProvider` abstraction with `groq_provider` and `gemini_provider` adapters and a `factory`.
 - `app/rag/`: Phase 3 retrieval. `chunking` (page-scoped, deterministic), `vector_store` (ChromaDB, owns the tenancy filter), `indexing` and `retrieval` (orchestration), and `embeddings/` (`EmbeddingProvider` abstraction with a local ONNX `semantic` provider and a `hashing` fallback). **Contains no LLM call.**
 - `app/api/`: Versioned API endpoints (`/api/v1/...`).
@@ -772,6 +1229,49 @@ row that produced the text.
 
 `discharge_documents` uses `ON DELETE RESTRICT` for the patient and
 `extraction_runs` uses `ON DELETE CASCADE` for the document.
+
+### Phase 6 pipeline
+```text
+submit daily check-in
+   → checkin_questions            (versioned question set + this patient's
+                                   warning symptoms, loaded WITH a patient filter)
+   → build_reports                (drop ids not in that patient's set →
+                                   unrecognised_warning_symptom; a cross-patient
+                                   id is indistinguishable from a nonexistent one)
+   → red_flag_rules.RuleSet       (pure function: stored facts + config → matches
+                                   + review codes. No clock, no model, no I/O.)
+   → persist CheckIn             (status, responses JSON, needs_review)
+   → persist Escalation rows      (one per matched rule; UNIQUE(checkin_id, rule_code))
+   → notification materialisation (Phase 5 outbox, caregiver_contact ONLY,
+                                   idempotency key from escalation + channel)
+   → single commit
+```
+
+The service owns the single commit, so a check-in row, its escalations, and
+their outbox notifications are all-or-nothing. An escalation can never exist
+without the check-in that justifies it.
+
+### Phase 6 tables
+- `checkins` - gains `responses` (JSON), `timezone`, `status`, `needs_review`,
+  `review_reason`, and `completed_at`. `response_text` becomes nullable so a
+  structured row can exist without free text; `UNIQUE (patient_id, date)` is
+  shared by both shapes.
+- `escalations` - one row per matched rule per check-in: `rule_code`,
+  `rule_version`, `category`, `workflow`, `status`, `severity`,
+  `warning_symptom_id`, `reason_code`, and the lifecycle timestamps
+  (`notified_at`, `acknowledged_at`, `resolved_at`, `resolution_note`) plus
+  `notification_blocked_reason`. `UNIQUE (checkin_id, rule_code)` makes
+  re-evaluation idempotent.
+- `reminders` - gains the `checkin` reminder type, with
+  `UNIQUE (patient_id, reminder_type, local_time, timezone)` so a patient
+  cannot silently end up with two daily prompts.
+- `notifications` - gains the `checkin_prompt` and `escalation_notice` types,
+  a nullable `escalation_id`, and
+  `UNIQUE (idempotency_key)`, which is what makes a retried recovery run safe.
+
+`WarningSymptom` rows are the only clinical input the rules read, and they are
+`ON DELETE RESTRICT` from an escalation, so an audit row can never outlive the
+stored fact it was derived from.
 
 ---
 
@@ -855,22 +1355,100 @@ contract and why any output must be read by a clinician before it reaches a
 patient. The system is built to fail toward silence, not toward a confident
 wrong answer.
 
+Phase 6 reads a patient's own reported symptoms and can cause a message about
+them to be sent, so its properties are enforced in code, independent of
+configuration and independent of any model:
+
+- **No symptom is ever inferred.** A rule can only fire on a
+  `WarningSymptom` row belonging to that patient. `build_reports()` receives
+  ids pre-filtered by patient, so an id belonging to someone else is
+  indistinguishable from one that does not exist — there is no code path that
+  hands an unverified id to a rule.
+- **Nothing is generated.** `patient_message` is a lookup from a fixed set of
+  sentences chosen by the *configured* workflow, not text written per patient.
+  The caregiver body is built from audit fields only: check-in date, rule code,
+  rule version, and the severity label a human already wrote on the symptom
+  row. It deliberately excludes the patient's answers, the symptom description
+  (document-derived text, which may not belong in front of a non-care-team
+  recipient), and any clinical instruction.
+- **The system derives no severity.** It compares a stored label against a
+  configured floor. It never ranks, combines, or synthesises a severity of its
+  own, and a label it cannot rank is skipped as `unknown_symptom_severity`
+  rather than defaulted to "low", which would let an unreadable symptom pass
+  every threshold.
+- **Unevaluable is never rounded to safe.** Distress with no matched symptom is
+  `unmapped_distress` → `needs_review`. It is not escalated (there is no
+  criterion to match) and it is not cleared (the patient may be reporting
+  something real). A human decides.
+- **Configuration cannot widen a clinical rule.** The severity floor can only
+  be raised, and it is explicitly exempt from the worsening rule so a knob
+  cannot silence a clinical signal. An unknown rule code is a startup error, so
+  a typo cannot disable the pathway.
+- **The pathway is inert until configured.** Both switches default off, so a
+  fresh deployment records and evaluates but acts on nothing, and an escalation
+  notice is never sent to a patient by mistake.
+- **A caregiver notice never falls back to the patient.** Missing
+  `caregiver_contact` parks the escalation with a recorded reason instead of
+  improvising a recipient. Sending a clinical alert to the patient would
+  disclose that the system has flagged them, before any human decided that was
+  right.
+- **Human decisions are terminal.** Escalation transitions are one-way, and a
+  late notification retry cannot overwrite a `resolved` or `cancelled`
+  status — only `notified_at` moves.
+
 ---
 
 ## Known Limitations
-  - **Phase 5 endpoints have no authentication.** The routes scope a reminder to
-    the patient named in the path and return `404` for a cross-patient id, so
-    the tenancy checks are real — but there is no identity layer, so anyone who
-    can reach the API can read any patient's reminders. Do not expose these
-    publicly until Phase 8. This applies to the reminder and notification
-    endpoints only; Phases 1–4 share the same gap.
+  - **There is no login endpoint, and no refresh token.** A principal is an
+    `AppUser` row, but there is no `POST /login` and no password-recovery flow:
+    accounts are created by the operator CLI
+    (`python -m app.cli.manage_access create-user`) and tokens are minted with
+    `manage_access mint-token`. That is a deliberate deferral, not an oversight
+    - it keeps password handling and session strategy out of this change - but
+    it means there is no self-service path, and a human is required to onboard
+    anyone. Tokens last 60 minutes by default with no refresh, so a real client
+    needs a token-minting service in front of it.
+  - **Revocation is immediate, but tokens are not re-checked for expiry.**
+    Deactivating an account or revoking a grant takes effect on the very next
+    request regardless of the token's remaining life. There is no denylist: a
+    token that was valid stays valid until it expires, so an operator who
+    suspects a stolen token must wait out `ACCESS_TOKEN_EXPIRE_MINUTES` or
+    rotate `SECRET_KEY`, which logs everyone out.
   - **There is no caregiver consent capture.** `Patient` has no `consent_*`
     field, so a caregiver is used as a recipient only if
     `caregiver_contact` is already populated, with no record that the patient
     agreed. Consent needs to be modelled before caregiver delivery is safe.
+    `CHECKIN_NOTIFY_CAREGIVER` is an operator setting, not a consent record.
+  - **An escalation is a flag, not a triage.** A match records a review
+    obligation for a human; nothing in this phase routes it to anyone, pages
+    anyone, or measures how long it sat unanswered. The lifecycle timestamps
+    (`acknowledged_at`, `resolved_at`) are set by the service as a human works
+    the queue, but a deployment still has to put a human and a queue behind
+    them.
+  - **Rules are anchored on Phase 2 warning symptoms.** A patient with no
+    documented warning symptoms can escalate nothing, however unwell they
+    report themselves — the answer becomes `unmapped_distress` and waits for a
+    human. This is the deliberate trade for refusing to infer a symptom, but
+    it means the pathway is only as good as the discharge documentation it is
+    fed.
+  - **The severity floor is a deployment-wide constant.** It cannot vary per
+    patient or per condition, so a population of very frail patients and a
+    population of post-appendectomy patients cannot both be tuned correctly
+    with one value.
+  - **Do not use `alembic revision --autogenerate` for Phase 6 tables.**
+    `escalations` and `notifications` reference each other (the escalation points
+    at the notification it produced; the notification points back at the
+    escalation it was made for), and SQLAlchemy cannot sort that cycle, so
+    autogenerate warns that *"Foreign key constraints involving these tables
+    will not be considered"* and quietly omits them. A generated migration would
+    therefore apply cleanly and still leave the schema wrong. These two tables
+    are hand-written in
+    `alembic/versions/20260928_0915_e6f1a2b4c7d9_create_phase_6_checkin_and_.py`
+    for that reason — `alembic check` (not autogenerate) is the right drift
+    gate, and it passes.
   - **No missed-dose escalation.** An occurrence that passes un-sent is retired
-    and counted, and nothing alerts anyone. Escalation to a clinician is a
-    Phase 6 concern; until then, a missed dose is visible only in
+    and counted, and nothing alerts anyone — Phase 6 escalates on reported
+    symptoms, not on medication adherence. A missed dose is visible only in
     `Notification.status`.
   - **A single scheduler tick processes one batch.** If a batch cannot finish
     inside the task's 60s soft limit, the remainder is picked up on the next
@@ -925,14 +1503,14 @@ wrong answer.
 
 ---
 
-## Future Phases
+## Roadmap
 
 ```text
-Phase 6 - Daily Check-in + Escalation
+Phase 6 - Daily Check-in + Escalation   (complete)
 Phase 7 - React Dashboard
 Phase 8 - Security, Testing, Deployment
 ```
 
-Phases 1–5 are complete and described above. Phase 5 delivered the scheduling
-and notification foundation; Phase 6 starts at the check-in and escalation
-layer that sits on top of it.
+Phases 1–6 are complete and described above. Phase 6 added the daily check-in
+and safe escalation layer on top of Phase 5's scheduling and notification
+foundation.

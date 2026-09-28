@@ -34,6 +34,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.core.config import Settings, get_settings
 from app.core.exceptions import (
     ReminderNotFoundError,
     ReminderValidationError,
@@ -55,6 +56,7 @@ from app.models.reminder import Reminder, ReminderStatus, ReminderType, Recurren
 from app.repositories.reminder import ReminderRepository
 from app.schemas.reminder import (
     AppointmentReminderCreate,
+    CheckInReminderCreate,
     MedicationReminderCreate,
     ReminderUpdate,
 )
@@ -115,9 +117,18 @@ def implied_daily_count(frequency_text: Optional[str]) -> Optional[int]:
 class ReminderService:
     """Creates, lists, and transitions reminder rules."""
 
-    def __init__(self, db: Session) -> None:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        settings: Optional[Settings] = None,
+    ) -> None:
         self._db = db
         self._repo = ReminderRepository(db)
+        # Phase 6 reads `checkin_prompt_time` from here. Injected rather than
+        # resolved at import so a test can set the deployment default without
+        # touching the environment.
+        self._settings = settings or get_settings()
 
     # ── Medication reminders ────────────────────────────────────────────────
     def create_medication_reminder(
@@ -416,6 +427,93 @@ class ReminderService:
         self._db.commit()
         self._db.refresh(updated)
         return updated
+
+    # ── Phase 6: the daily check-in prompt ──────────────────────────────────
+    def create_checkin_reminder(
+        self,
+        patient_id: uuid.UUID,
+        data: CheckInReminderCreate,
+    ) -> Reminder:
+        """
+        Create the daily check-in prompt, or return the one already there.
+
+        This is a Phase 5 `Reminder` with `reminder_type = checkin`, so the
+        existing due-scan materialises it, the existing delivery worker sends
+        it, and the existing retry policy covers a failed send.  Phase 6 adds
+        no scheduler of its own.
+
+        IDEMPOTENT BY DESIGN
+        Creating a second daily prompt would make the patient receive two
+        identical messages a day, so the call is safe to repeat: an existing
+        prompt for the same patient and local time is returned as-is.  A
+        caller who wants a different time cancels this one and creates another
+        - an explicit act, rather than an accidental duplicate.
+
+        The message content is fixed and non-clinical: it says a daily
+        check-in is being requested and nothing about the patient's condition.
+        `NotificationService` renders it, and the escalation rules decide
+        whether anything about the ANSWERS needs attention - never the prompt.
+        """
+        patient = self._db.get(Patient, patient_id)
+        if patient is None:
+            raise ReminderNotFoundError(
+                "No patient was found for this reminder."
+            )
+
+        tz_name = validate_timezone_name(
+            data.timezone or patient.timezone or DEFAULT_TIMEZONE
+        )
+        prompt_time = data.local_time or self._settings.checkin_prompt_time
+
+        existing = self._repo.get_checkin_slot(patient_id, prompt_time)
+        if existing is not None:
+            logger.info(
+                "checkin_reminder_reused patient_id=%s reminder_id=%s",
+                patient_id,
+                existing.id,
+            )
+            return existing
+
+        next_occurrence = self._first_occurrence(
+            tz_name=tz_name,
+            dose_time=prompt_time,
+            recurrence=Recurrence.daily,
+            interval=1,
+            active_from=None,
+            active_until=None,
+        )
+
+        reminder = Reminder(
+            patient_id=patient_id,
+            reminder_type=ReminderType.checkin,
+            medication_id=None,
+            appointment_id=None,
+            local_time=prompt_time,
+            recurrence=Recurrence.daily,
+            recurrence_interval=1,
+            frequency_text=None,
+            timezone=tz_name,
+            next_occurrence_at=next_occurrence,
+            active_from=None,
+            active_until=None,
+            status=ReminderStatus.active,
+            # A check-in prompt carries no clinical content, so there is nothing
+            # here for a human to review. Review belongs to the ANSWERS, and
+            # that flag lives on the check-in row.
+            needs_review=False,
+            review_reason=None,
+            notes=data.notes,
+        )
+        created = self._repo.create(reminder)
+        self._db.commit()
+        self._db.refresh(created)
+        logger.info(
+            "checkin_reminder_created patient_id=%s reminder_id=%s local_time=%s",
+            patient_id,
+            created.id,
+            prompt_time.strftime("%H:%M"),
+        )
+        return created
 
     # ── Occurrence maths ────────────────────────────────────────────────────
     def _first_occurrence(

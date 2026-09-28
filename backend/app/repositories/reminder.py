@@ -7,13 +7,13 @@ the service so the index that makes it fast is declared in one place.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 from typing import List, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.reminder import Reminder, ReminderStatus
+from app.models.reminder import Reminder, ReminderStatus, ReminderType
 
 
 class ReminderRepository:
@@ -131,6 +131,26 @@ class ReminderRepository:
         """
         stmt = select(Reminder).where(
             Reminder.medication_id == medication_id,
+            Reminder.local_time == local_time,
+        )
+        return self._db.scalars(stmt).first()
+
+    def get_checkin_slot(
+        self, patient_id: uuid.UUID, local_time: time
+    ) -> Optional[Reminder]:
+        """
+        The patient's check-in prompt at this local time, if one exists.
+
+        Backs the Phase 6 "one daily prompt" check, and makes the request
+        idempotent in the useful direction: asking twice returns the existing
+        prompt rather than failing, because a client retrying a schedule call
+        is far more likely than a caller genuinely wanting two prompts a day.
+        The unique index `uq_reminders_checkin_slot` remains the real guard
+        against a race between two requests.
+        """
+        stmt = select(Reminder).where(
+            Reminder.patient_id == patient_id,
+            Reminder.reminder_type == ReminderType.checkin,
             Reminder.local_time == local_time,
         )
         return self._db.scalars(stmt).first()

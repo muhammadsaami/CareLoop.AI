@@ -30,6 +30,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from app.rag.indexing import RagIndexingService
 from app.rag.retrieval import RagRetrievalService
@@ -180,9 +181,99 @@ class TestMissingOwnershipIsControlled:
     def test_unknown_patient_id_is_a_404_not_a_500(
         self, rag_client, indexed_document, make_patient
     ):
+        """
+        403, not 500 - and specifically not 500, which is the point of the test.
+
+        The authorization check runs before the retrieval service, and it
+        refuses a patient the caller has no grant for without touching the
+        vector store at all.  The original 500 this guarded against was a
+        missing-tenant crash; the answer is now a clean refusal.
+
+        Naming: the id is a real patient that this principal has no grant to, so
+        the case is genuinely "access denied" rather than "no such patient".
+        """
         _, document, _ = indexed_document
         response = retrieve(rag_client, uuid.UUID(int=555555), document.id)
-        assert response.status_code == 404
+        assert response.status_code == 403
+
+    def test_index_route_requires_a_grant_to_the_body_patient(
+        self, rag_client, indexed_document, make_patient, db_session
+    ):
+        """
+        Indexing is refused 403 when the caller holds no grant to the body patient.
+
+        The index route carries two attacker-controlled ids - `patient_id` in
+        the body and `document_id` in the path - and only the body patient can be
+        grant-checked at the HTTP layer.  Reconciling the pair is the service's
+        job (`_load_owned_document`), and the tests above pin that it 404s a
+        mismatched pair before touching the vector store.
+
+        What was missing is the layer in between: a caller with a grant to
+        NOTHING was previously able to name any patient in the body and let the
+        service do the deciding.  The grant check has to come first, or the
+        service's ownership lookup becomes the authorization boundary for an
+        unauthenticated-in-spirit caller who happens to guess a patient id.
+
+        The grant the fixtures create is removed explicitly, because the suite
+        auto-grants new patients to the ambient principal - which is exactly the
+        access this test needs to deny.
+        """
+        _, document, _ = indexed_document
+        stranger = make_patient(name="Stranger", suffix="9500")
+
+        db_session.execute(
+            text("DELETE FROM patient_access WHERE patient_id = :p"),
+            {"p": stranger.id},
+        )
+        db_session.commit()
+
+        response = rag_client.post(
+            index_url(document.id),
+            json={"patient_id": str(stranger.id)},
+        )
+        assert response.status_code == 403
+
+    def test_index_route_separates_the_grant_check_from_the_pair_check(
+        self, rag_client, indexed_document, make_patient, db_session
+    ):
+        """
+        The two layers refuse for different reasons, and both are reachable.
+
+        This route has two independent controls, and conflating them would make
+        it easy to "fix" one and quietly weaken the other:
+
+          * the GRANT check, in the dependency, asks "may this caller act for
+            this patient at all?" and answers 403;
+          * the PAIR check, in the service, asks "does this document belong to
+            this patient?" and answers 404.
+
+        So a caller holding a grant to patient B, naming B in the body and
+        pointing the path at patient A's document, clears the grant check and is
+        refused by the service.  A 404 here is the CORRECT answer - and it must
+        not be "fixed" into a 403 by a later change, because 403 would confirm
+        that A's document exists.
+
+        The suite's fixtures auto-grant new patients to the ambient principal,
+        so "a patient the caller may not act for" has to be produced by
+        removing the grant explicitly.  That is what makes this one test cover
+        both layers: 403 with the grant removed, 404 with it present.
+        """
+        _, document, _ = indexed_document
+        patient_b = make_patient(name="Patient B", suffix="9501")
+
+        assert rag_client.post(
+            index_url(document.id), json={"patient_id": str(patient_b.id)}
+        ).status_code == 404, "granted caller, mismatched pair -> service 404"
+
+        db_session.execute(
+            text("DELETE FROM patient_access WHERE patient_id = :p"),
+            {"p": patient_b.id},
+        )
+        db_session.commit()
+
+        assert rag_client.post(
+            index_url(document.id), json={"patient_id": str(patient_b.id)}
+        ).status_code == 403, "ungranted caller -> dependency 403, never reaching the service"
 
     def test_nonexistent_document_is_a_404(self, rag_client, sample_patient):
         response = retrieve(

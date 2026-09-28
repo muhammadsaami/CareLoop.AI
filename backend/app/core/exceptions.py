@@ -362,9 +362,159 @@ class SchedulerUnavailableError(CareLoopError):
     """
     The scheduler backend (Redis / Celery) could not be reached.
 
-    Distinct from a delivery failure: nothing was attempted, so a retry of the
-    whole dispatch is meaningful.
+    Distinct from a delivery failure: nothing was attempted, so a retry of
+    the whole dispatch is meaningful.
     """
 
     status_code = 503
     default_message = "The reminder scheduler is currently unavailable."
+
+
+# ── Phase 6: Daily check-ins & escalation ────────────────────────────────
+
+
+class CheckInNotFoundError(CareLoopError):
+    """
+    No check-in was found for this patient.
+
+    404 rather than 403 for the same reason as `ReminderNotFoundError`: a 403
+    would confirm that the id exists, letting a caller probe for another
+    patient's check-ins.
+    """
+
+    status_code = 404
+    default_message = "Check-in not found."
+
+
+class CheckInValidationError(CareLoopError):
+    """
+    The check-in answers could not be accepted as submitted.
+
+    422: the caller supplied something the server can act on differently.
+    """
+
+    status_code = 422
+    default_message = "The check-in could not be recorded as submitted."
+
+
+class CheckInAlreadySubmittedError(CheckInValidationError):
+    """
+    This patient already has a check-in for this date.
+
+    A 409 rather than a silent overwrite: re-submitting a day is either a
+    double tap or two devices disagreeing, and quietly replacing the first
+    answer would destroy the record of what the patient actually said.
+    """
+
+    status_code = 409
+    default_message = (
+        "A check-in has already been recorded for this date. "
+        "One check-in per day is recorded."
+    )
+
+
+class EscalationNotFoundError(CareLoopError):
+    """
+    No escalation was found.
+
+    Also the response to a cross-patient request, for the same
+    do-not-confirm-existence reason as `CheckInNotFoundError`.
+    """
+
+    status_code = 404
+    default_message = "Escalation not found."
+
+
+class EscalationTransitionError(CareLoopError):
+    """
+    The requested lifecycle transition is not permitted.
+
+    409: the escalation exists and is readable, but it is already in a state
+    that makes this move meaningless - acknowledging a resolved escalation, for
+    example.  Reported rather than ignored, because a caller that believes it
+    acknowledged something needs to know it did not.
+    """
+
+    status_code = 409
+    default_message = (
+        "This escalation cannot move to that state from where it is now."
+    )
+
+
+class EscalationNotNotifiableError(CareLoopError):
+    """
+    A caregiver notification was requested but cannot be built.
+
+    422, and deliberately NOT a silent no-op: the common cause is a patient
+    record with no caregiver contact, and burying that in a log means an
+    escalation sits in `pending` forever while the system looks healthy.
+    """
+
+    status_code = 422
+    default_message = (
+        "A caregiver notification cannot be requested for this escalation "
+        "with the information currently on file."
+    )
+
+
+# ── Authentication & authorization ───────────────────────────────────────────
+
+
+class AuthenticationError(CareLoopError):
+    """
+    The caller could not be identified. 401.
+
+    Covers every way a request fails to present a usable credential: no
+    Authorization header, a header that is not Bearer, a token that is
+    malformed, signed with the wrong key or algorithm, expired, revoked by
+    deactivation, or carrying a subject that is not a user.
+
+    The message is FIXED.  Every subclass of this failure returns the same text
+    to the client, so a caller cannot distinguish "your token expired" from
+    "that signature is wrong" from "no such user" by comparing responses.  The
+    specific reason goes to `internal_detail` for the server log and nowhere
+    else; telling an unauthenticated caller which check failed turns the
+    endpoint into an oracle for testing whether a guessed token is structurally
+    valid.
+
+    401 rather than 403: the server does not know who you are, so it cannot say
+    what you are allowed to do.
+    """
+
+    status_code = 401
+    default_message = "Authentication required."
+
+
+class AuthorizationError(CareLoopError):
+    """
+    The caller is known but not permitted to do this. 403.
+
+    Distinct from 401 on purpose: the client should re-authenticate for a 401
+    and NOT for a 403, and the difference is what stops a client from looping
+    on a permission it will never be granted.
+
+    Also distinct from 404: `app.services.access_control` returns 404 when
+    refusing a resource-keyed request, so that the response does not confirm
+    the resource exists.  This error is used where the caller already holds the
+    identifier, so existence is not disclosed either way.
+    """
+
+    status_code = 403
+    default_message = (
+        "You are not authorized to access this patient's records."
+    )
+
+
+class ResourceNotFoundError(CareLoopError):
+    """
+    A resource is absent, or the caller may not know that it exists. 404.
+
+    One error for both cases, on purpose - see `app.services.access_control`.
+    Answering 403 to a caller who named a resource id they do not own would
+    confirm the id is real, which turns any patient-scoped endpoint into an
+    enumeration oracle.  Returning the same 404 for "no such row" and "not
+    yours" is what makes the identifier unguessable in practice.
+    """
+
+    status_code = 404
+    default_message = "Not found."

@@ -21,8 +21,9 @@ SAFETY SHAPE OF THIS ROUTER
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.auth_deps import require_agent_query_patient_access
 from app.api.deps import AgentServiceDep
 from app.core.logging import get_logger
 from app.schemas.agent import (
@@ -73,6 +74,7 @@ def _to_response(result) -> GroundedAnswerResponse:
         502: {"description": "LLM provider returned an unusable response"},
         503: {"description": "Provider not configured, or vector store unavailable"},
     },
+    dependencies=[Depends(require_agent_query_patient_access)],
 )
 def query_document(
     payload: GroundedAnswerRequest, service: AgentServiceDep

@@ -14,8 +14,12 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-from fastapi import APIRouter, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
+from app.api.auth_deps import (
+    require_discharge_upload_patient_access,
+    require_patient_access,
+)
 from app.api.deps import DischargeDocumentServiceDep
 from app.core.logging import get_logger
 from app.schemas.discharge_document import (
@@ -44,6 +48,7 @@ router = APIRouter(tags=["Discharge Documents"])
         422: {"description": "Document is corrupted or unreadable"},
         503: {"description": "OCR or extraction provider not configured"},
     },
+    dependencies=[Depends(require_discharge_upload_patient_access)],
 )
 def upload_discharge_document(
     service: DischargeDocumentServiceDep,
@@ -73,6 +78,7 @@ def upload_discharge_document(
     response_model=DischargeDocumentDetailResponse,
     summary="Get a discharge document and its extraction audit trail",
     responses={404: {"description": "Document not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def get_discharge_document(
     document_id: uuid.UUID, service: DischargeDocumentServiceDep
@@ -87,6 +93,7 @@ def get_discharge_document(
     response_model=List[DischargeDocumentResponse],
     summary="List discharge documents for a patient",
     responses={404: {"description": "Patient not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def list_patient_discharge_documents(
     patient_id: uuid.UUID, service: DischargeDocumentServiceDep
@@ -107,6 +114,7 @@ def list_patient_discharge_documents(
         422: {"description": "Document is corrupted or unreadable"},
         503: {"description": "OCR or extraction provider not configured"},
     },
+    dependencies=[Depends(require_patient_access)],
 )
 def reprocess_discharge_document(
     document_id: uuid.UUID, service: DischargeDocumentServiceDep

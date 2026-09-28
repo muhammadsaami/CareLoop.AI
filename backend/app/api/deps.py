@@ -14,7 +14,9 @@ from app.core.database import get_db
 from app.llm.base import LLMProvider
 from app.rag.indexing import RagIndexingService
 from app.rag.retrieval import RagRetrievalService
+from app.services.daily_checkin import DailyCheckInService
 from app.services.discharge_document import DischargeDocumentService
+from app.services.escalation import EscalationService
 from app.services.extraction import ExtractionService
 from app.services.notification import NotificationService
 from app.services.reminder import ReminderService
@@ -166,11 +168,71 @@ NotificationServiceDep = Annotated[
 SchedulerServiceDep = Annotated[SchedulerService, Depends(get_scheduler_service)]
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 6 — Daily check-ins & escalation
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `get_escalation_service` depends on `NotificationServiceDep`, and
+# `get_daily_checkin_service` depends on `EscalationServiceDep`.  That chain is
+# the whole wiring, and it has to be a real chain: an escalation raised through
+# the check-in route must reach the SAME notification service the request built,
+# or a caregiver alert silently takes a different transport (and a different
+# test seam) from every other notification in the system.
+
+
+def get_escalation_service(
+    db: DbSession,
+    notifications: NotificationServiceDep,
+) -> EscalationService:
+    """
+    Request-scoped escalation service.
+
+    Built on the request's notification service, so a caregiver alert raised by
+    a check-in submission goes through the same provider, retry policy, and
+    delivery history as a medication reminder.
+    """
+    return EscalationService(
+        db, settings=get_settings(), notification_service=notifications
+    )
+
+
+EscalationServiceDep = Annotated[
+    EscalationService, Depends(get_escalation_service)
+]
+
+
+def get_daily_checkin_service(
+    db: DbSession,
+    escalations: EscalationServiceDep,
+) -> DailyCheckInService:
+    """
+    Request-scoped daily check-in service.
+
+    The escalation service is INJECTED rather than left to be constructed
+    internally.  Dropping it would not fail loudly - `DailyCheckInService`
+    would quietly build its own, from settings, with its own notification
+    service and no test seam.  Escalations would still be recorded, so the
+    endpoint would look correct while caregiver notices went somewhere the
+    test cannot observe.
+    """
+    return DailyCheckInService(
+        db, settings=get_settings(), escalation_service=escalations
+    )
+
+
+DailyCheckInServiceDep = Annotated[
+    DailyCheckInService, Depends(get_daily_checkin_service)
+]
+
+
+
 # Re-exported so tests and future routes share a single construction path.
 __all__ = [
     "AgentSafetyValidatorDep",
     "AgentServiceDep",
     "DbSession",
+    "DailyCheckInServiceDep",
+    "EscalationServiceDep",
     "GroundedResponseGeneratorDep",
     "LLMProviderDep",
     "DischargeDocumentServiceDep",
@@ -181,6 +243,8 @@ __all__ = [
     "SchedulerServiceDep",
     "get_agent_safety_validator",
     "get_agent_service",
+    "get_daily_checkin_service",
+    "get_escalation_service",
     "get_grounded_response_generator",
     "get_llm_provider",
     "get_discharge_document_service",

@@ -6,8 +6,9 @@ from __future__ import annotations
 import uuid
 from typing import List
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Depends, Response, status
 
+from app.api.auth_deps import require_patient_access
 from app.api.deps import DbSession
 from app.schemas.appointment import AppointmentCreate, AppointmentResponse, AppointmentUpdate
 from app.services.appointment import AppointmentService
@@ -21,6 +22,7 @@ router = APIRouter(tags=["Appointments"])
     status_code=status.HTTP_201_CREATED,
     summary="Create an appointment for a patient",
     responses={404: {"description": "Patient not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def create_appointment(
     patient_id: uuid.UUID, data: AppointmentCreate, db: DbSession
@@ -33,6 +35,7 @@ def create_appointment(
     response_model=List[AppointmentResponse],
     summary="List appointments for a patient",
     responses={404: {"description": "Patient not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def list_appointments(patient_id: uuid.UUID, db: DbSession) -> List[AppointmentResponse]:
     return AppointmentService(db).list_appointments(patient_id)
@@ -43,6 +46,7 @@ def list_appointments(patient_id: uuid.UUID, db: DbSession) -> List[AppointmentR
     response_model=AppointmentResponse,
     summary="Update an appointment",
     responses={404: {"description": "Appointment not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def update_appointment(
     appointment_id: uuid.UUID, data: AppointmentUpdate, db: DbSession
@@ -56,6 +60,7 @@ def update_appointment(
     response_class=Response,
     summary="Delete an appointment",
     responses={404: {"description": "Appointment not found"}},
+    dependencies=[Depends(require_patient_access)],
 )
 def delete_appointment(appointment_id: uuid.UUID, db: DbSession) -> Response:
     AppointmentService(db).delete_appointment(appointment_id)
