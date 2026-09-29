@@ -14,13 +14,23 @@ It does NOT: decide who may see which patient.  That is `app.services.access_con
 and keeping the split sharp is what stops "valid token" from silently becoming
 "allowed to read anything".
 
-WHY THERE IS NO LOGIN ENDPOINT
-------------------------------
-Tokens are minted by `app/cli/manage_access.py`, an operator CLI.  Publishing
-`POST /auth/token` would add a password-guessing surface to a clinical API and
-drag in account lockout, rate limiting, password reset, and MFA - none of which
-is this phase's job, and all of which would be worse than the absence.  A
-token issued to an operator is minted once, offline, and expires in minutes.
+WHY LOGIN LIVES AT /API/V1/AUTH, NOT ON THE CLI
+-----------------------------------------------
+Phase 8A added patient self-service authentication: `POST /auth/register`
+creates an account and `POST /auth/login` exchanges credentials for a token.
+The operator CLI (`app/cli/manage_access.py`) is therefore no longer the only
+way to hold a credential - but it is still the ONLY way to grant access to
+another patient (`caregiver`/`care_team`), set `system_access`, or mint a token
+for an operator account, and those commands are deliberately not reachable from
+HTTP.  The CLI minting path documented below remains intact for exactly that
+surface.
+
+WHY THE ENDPOINT IS CAREFUL
+---------------------------
+Login is a password-guessing surface by nature, so it keeps every countermeasure
+this module already had: passwords are hashed with bcrypt, tokens are signed
+with a required server-side key, and the response is one identical 401 for every
+failure so the endpoint cannot be used to enumerate which emails exist.
 
 THE SIGNING KEY
 ---------------

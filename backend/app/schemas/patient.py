@@ -94,7 +94,7 @@ class PatientResponse(BaseModel):
 
     id: uuid.UUID
     name: str
-    contact_number: str
+    contact_number: Optional[str]
     caregiver_contact: Optional[str]
     discharge_date: Optional[date]
     timezone: str = "UTC"

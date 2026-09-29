@@ -42,12 +42,17 @@ endpoints act on EVERY patient at once (`POST /notifications/dispatch`,
 do that, so it is an explicit boolean rather than a hidden convention: the
 default is False, and it is only ever set by an operator.
 
-GRANTS ARE NEVER CREATED THROUGH THE API
+NO API ROUTE CAN WIDEN OR REVOKE A GRANT
 ----------------------------------------
-There is no route that creates, widens, or revokes a grant.  A caller who
-could mint their own `care_team` grant could read every patient in the system,
-so grant management is an operator action (see `app/cli/manage_access.py`)
-and is deliberately outside the HTTP surface.
+A caller who could mint their own `care_team` grant could read every patient
+in the system, so grant management is an operator action (see
+`app/cli/manage_access.py`).  The single exception is patient self-
+registration (`POST /api/v1/auth/register`), which grants exactly one `self`
+grant to the patient record it itself just created.  That is safe for one
+reason: the patient id is minted server-side by the route and never taken from
+the caller, so the grant cannot point at anybody else.  Everything else -
+widening a grant, revoking one, or minting `care_team`/`caregiver` grants -
+remains outside the HTTP surface.
 """
 from __future__ import annotations
 
@@ -119,6 +124,16 @@ class AppUser(Base):
     # "alice@" would lock a person out of their own record, so one canonical
     # form is the safer failure.
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+
+    # Display name for the account, captured at self-registration.  Separate
+    # from the patient's `name` so an account can exist before (or without) a
+    # patient record; operator-created accounts leave it as an empty string.
+    full_name: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        default="",
+        server_default="",
+    )
 
     # A bcrypt digest, never a password.  The column is named for the fact
     # rather than the algorithm so the hashing scheme can be upgraded without a

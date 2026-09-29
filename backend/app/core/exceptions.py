@@ -485,6 +485,20 @@ class AuthenticationError(CareLoopError):
     default_message = "Authentication required."
 
 
+class EmailAlreadyRegisteredError(CareLoopError):
+    """
+    Self-service registration was attempted with a taken email. 409.
+
+    409, not 400: the request is well-formed; it conflicts with a resource that
+    already exists.  The message is deliberately generic - it names no account
+    details - because revealing how an email is formatted would be telling a
+    caller which spellings exist.
+    """
+
+    status_code = 409
+    default_message = "An account with this email already exists."
+
+
 class AuthorizationError(CareLoopError):
     """
     The caller is known but not permitted to do this. 403.

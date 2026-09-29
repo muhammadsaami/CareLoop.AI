@@ -98,6 +98,7 @@ _SCHEMA_MARKERS = (
     ("notifications", "escalation_id"),
     ("app_users", "password_hash"),
     ("app_users", "system_access"),
+    ("app_users", "full_name"),
     ("patient_access", "relationship"),
     ("patient_access", "revoked_at"),
 )

@@ -92,6 +92,28 @@ class AccessControlService:
             statement = statement.where(PatientAccess.patient_id.in_(candidates))
         return set(self._db.execute(statement).scalars().all())
 
+    def self_patient_ids(self, user: AppUser) -> list[uuid.UUID]:
+        """
+        The patient ids this user holds an ACTIVE `self` grant to.
+
+        This is the account's own identity, not its reach: a caregiver with
+        access to six patients and a `self` grant to none returns an empty
+        list, which is exactly right for `/auth/me`.  A self-registered patient
+        holds exactly one such grant, minted at registration; operators and
+        caregivers never hold `self`.  Ordered by grant time so the answer is
+        deterministic even in the theoretical multi-self-grant case.
+        """
+        statement = (
+            select(PatientAccess.patient_id)
+            .where(
+                PatientAccess.user_id == user.id,
+                PatientAccess.relationship == AccessRelationship.SELF,
+                PatientAccess.revoked_at.is_(None),
+            )
+            .order_by(PatientAccess.granted_at)
+        )
+        return list(self._db.execute(statement).scalars().all())
+
     # â”€â”€ Decisions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def require_patient_access(self, user: AppUser, patient_id: uuid.UUID) -> None:

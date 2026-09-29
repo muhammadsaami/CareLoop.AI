@@ -17,6 +17,7 @@ from app.api.routes import (
     adherence,
     agent,
     appointments,
+    auth,
     checkins,
     discharge_documents,
     escalations,
@@ -176,17 +177,26 @@ API_V1 = "/api/v1"
 PROTECTED = [Depends(require_authenticated_user)]
 
 # ── The public surface, in full ──────────────────────────────────────────────
-# `/health` and `/health/ready` are the ONLY unauthenticated routes in the
-# application. They are public because a load balancer, a container probe, and
-# an uptime monitor must reach them without holding a credential - and because
-# what they return is liveness, never patient data: `/health` reports status,
-# `/health/ready` reports database and worker reachability. A probe that
-# required a token would be a probe that fails precisely when authentication is
-# broken, which is the moment an operator needs it to pass.
+# `/health`, `/health/ready`, `/auth/register`, and `/auth/login` are the ONLY
+# unauthenticated routes in the application.
+#
+# `/health` and `/health/ready` are public because a load balancer, a container
+# probe, and an uptime monitor must reach them without holding a credential -
+# and because what they return is liveness, never patient data: `/health`
+# reports status, `/health/ready` reports database and worker reachability. A
+# probe that required a token would be a probe that fails precisely when
+# authentication is broken, which is the moment an operator needs it to pass.
+#
+# `/auth/register` and `/auth/login` are public because a credential must be
+# creatable and exchangeable without already holding one.  They are the patient
+# self-service surface (Phase 8A); `/auth/me` on the same router is protected by
+# `require_authenticated_user` on the route itself, so the router needs no
+# router-level gate.
 #
 # Nothing else is public. `/docs`, `/redoc` and `/openapi.json` are not
 # registered in production at all - see the FastAPI(...) call above.
 app.include_router(health.router, prefix=API_V1)
+app.include_router(auth.router, prefix=API_V1)
 
 app.include_router(patients.router, prefix=API_V1, dependencies=PROTECTED)
 app.include_router(medications.router, prefix=API_V1, dependencies=PROTECTED)

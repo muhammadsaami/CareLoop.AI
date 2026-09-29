@@ -29,7 +29,10 @@ class Patient(Base):
         default=uuid.uuid4,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    contact_number: Mapped[str] = mapped_column(String(50), nullable=False)
+    # NULL for a patient created by self-registration, which does not collect a
+    # phone number.  The notification layer treats a missing contact as "not
+    # deliverable" rather than silently dropping the reminder.
+    contact_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
     caregiver_contact: Mapped[str | None] = mapped_column(String(50), nullable=True)
     discharge_date: Mapped[date | None] = mapped_column(nullable=True)
 

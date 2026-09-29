@@ -1,6 +1,7 @@
 """CareLoop AI — API routes package."""
 from app.api.routes import (
     health,
+    auth,
     patients,
     medications,
     appointments,
@@ -11,6 +12,7 @@ from app.api.routes import (
 
 __all__ = [
     "health",
+    "auth",
     "patients",
     "medications",
     "appointments",

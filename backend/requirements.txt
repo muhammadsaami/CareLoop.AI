@@ -34,10 +34,17 @@ python-dotenv==1.0.1
 PyJWT==2.13.0
 bcrypt==4.3.0
 
+# ── Phase 8A — Patient self-service authentication ───────────────────────────
+# `email-validator` backs pydantic's `EmailStr`, which the register and login
+# schemas use (app/schemas/auth.py) to reject a malformed mailbox with a 422
+# before it ever reaches the account layer.  Pinned because pydantic's EmailStr
+# behaviour depends on the validator's normalization rules.
+email-validator==2.3.0
+
 # Testing
 pytest==8.3.4
 pytest-asyncio==0.24.0
-httpx==0.28.0
+httpx==0.28.1
 
 # Utilities
 python-multipart==0.0.20

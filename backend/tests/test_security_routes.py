@@ -44,6 +44,20 @@ PUBLIC_PATHS = frozenset(
     }
 )
 
+#: The patient self-service authentication surface (Phase 8A).  These two
+#: endpoints are public so that a credential can be created and exchanged
+#: without already holding one - but they are the ONLY such endpoints, and the
+#: other route on the same router (`/auth/me`) is protected on the route itself.
+#: `test_auth_paths_are_the_only_unauthenticated_auth_routes` pins that the
+#: public auth surface is exactly this set and nothing more (so a future
+#: `/auth/logout` cannot silently join it public).
+AUTH_PATHS = frozenset(
+    {
+        "/api/v1/auth/register",
+        "/api/v1/auth/login",
+    }
+)
+
 #: Endpoints that act on every patient at once, and therefore require
 #: `system_access` rather than a per-patient grant.
 SYSTEM_PATHS = frozenset(
@@ -145,16 +159,41 @@ def test_every_other_route_requires_authentication():
     this should hold for the whole table. If it ever fails, the route was added
     to a router that was not registered under `PROTECTED` in `app.main` - which
     is the single most likely way for a new endpoint to end up open.
+
+    The only exemptions are the documented public surface: the two liveness
+    probes and the two self-service auth endpoints.
     """
+    exempt = PUBLIC_PATHS | AUTH_PATHS
     unprotected = sorted(
         f"{sorted(r.methods)} {r.path}"
         for r in ALL_ROUTES
-        if r.path not in PUBLIC_PATHS and not _has_authentication(r)
+        if r.path not in exempt and not _has_authentication(r)
     )
     assert not unprotected, (
         "routes reachable without authentication:\n  "
         + "\n  ".join(unprotected)
     )
+
+
+def test_auth_paths_are_the_only_unauthenticated_auth_routes():
+    """
+    The public auth surface is exactly `/auth/register` and `/auth/login`.
+
+    `/auth/me` must remain protected on its own route (the router is registered
+    without `PROTECTED`), and no other route under `/api/v1/auth/` - such as a
+    fake `/auth/logout` - may join the surface without an explicit decision.
+    """
+    auth_unprotected = sorted(
+        r.path
+        for r in ALL_ROUTES
+        if r.path.startswith("/api/v1/auth") and not _has_authentication(r)
+    )
+    assert set(auth_unprotected) == AUTH_PATHS, (
+        "unexpected unauthenticated routes under /api/v1/auth/:\n  "
+        + "\n  ".join(sorted(set(auth_unprotected) - AUTH_PATHS))
+    )
+    me = next(r for r in ALL_ROUTES if r.path == "/api/v1/auth/me")
+    assert _has_authentication(me), "/api/v1/auth/me must require a bearer token"
 
 
 def test_public_router_touches_no_patient_data():
@@ -295,22 +334,31 @@ def test_system_access_is_not_claimed_by_any_patient_route():
 
 # ── 5. No route can manage its own grants ───────────────────────────────────
 
-
-#: The one route permitted to create a grant.
+#: The only routes permitted to create a grant.
 #:
 #: `POST /patients` creates the patient row and grants the caller `self` access
 #: to it, in the same request.  Without that, creating a patient would produce a
-#: record its own creator cannot read.  It is the only self-service grant in the
-#: system, and it is safe for one specific reason: the patient id in the grant is
-#: the one the route just minted, never one the caller supplied.  A second
-#: endpoint, or a `patient_id` taken from the request, would not be.
-ALLOWED_GRANT_ROUTES = frozenset({"/api/v1/patients"})
+#: record its own creator cannot read.
+#:
+#: `POST /auth/register` (Phase 8A) does the same for self-service
+#: registration: it mints the account's patient alongside the account, and the
+#: grant points at that just-minted patient.
+#:
+#: Both are safe for one specific reason: the patient id in the grant is the one
+#: the route just created, never one the caller supplied.  A third endpoint, or
+#: a `patient_id` taken from the request, would not be.
+ALLOWED_GRANT_ROUTES = frozenset(
+    {
+        "/api/v1/patients",
+        "/api/v1/auth/register",
+    }
+)
 
 
-def test_grants_can_only_be_created_by_the_patient_creation_route():
+def test_grants_can_only_be_created_by_the_allowed_creation_routes():
     """
-    No route may create a grant except `POST /patients`, and no route may revoke
-    one at all.
+    No route may create a grant except the two self-service creation routes, and
+    no route may revoke one at all.
 
     A principal who could reach grant management could mint a `care_team` grant
     over any patient and then read that patient's entire record - which makes
@@ -348,26 +396,37 @@ def test_no_route_can_create_or_modify_an_account():
     one global privilege, and a route that could set it would let any
     authenticated caller promote itself to operator and then dispatch or retry
     notifications for every patient in the system.
+
+    The one exception is self-service registration, which by definition creates
+    an account (`POST /auth/register`).  It is carved out of the account-CREATION
+    patterns only; it is held to the `system_access` and `setattr` bans like
+    every other route, so a registration that tried to promote itself would
+    still fail this test.
     """
     # Matched on ASSIGNMENT shapes only.  A bare `system_access` also appears in
     # the two system routes' `Depends(require_system_access)` decorators, which
     # is a privilege READ - exactly what those routes are for.
-    assignment_patterns = (
-        "AppUser(",
-        "password_hash",
+    system_flag_patterns = (
         "system_access=",
         "system_access =",
         '"system_access"',
         "'system_access'",
-        "setattr",
     )
+    account_creation_patterns = ("AppUser(", "password_hash", "setattr")
+    account_creation_allowed = {"/api/v1/auth/register"}
+
     offenders: list[str] = []
     for route in ALL_ROUTES:
         source = _readable_source(route.endpoint)
         if source is None:  # pragma: no cover
             continue
         label = f"{sorted(route.methods)} {route.path}"
-        for needle in assignment_patterns:
+        for needle in system_flag_patterns:
+            if needle in source:
+                offenders.append(f"{label} ({needle})")
+        if route.path in account_creation_allowed:
+            continue
+        for needle in account_creation_patterns:
             if needle in source:
                 offenders.append(f"{label} ({needle})")
 
@@ -378,23 +437,24 @@ def test_no_route_can_create_or_modify_an_account():
 
 def test_the_self_grant_cannot_target_a_caller_supplied_patient():
     """
-    `POST /patients` must grant the id it just created, not one from the request.
+    Every allowed self-grant route must grant the id it just created, not one
+    from the request.
 
-    This is the sharp edge of the single self-service grant, and it is checkable
+    This is the sharp edge of the two self-service grants, and it is checkable
     without executing anything: the handler must not take a `patient_id`
     parameter, and must not read one from the submitted body. If either appears,
     the route has become a grant-issuing endpoint for an arbitrary patient.
     """
-    route = next(r for r in ALL_ROUTES if r.path in ALLOWED_GRANT_ROUTES)
-    params = {p.name for p in route.dependant.query_params} | {
-        p.name for p in route.dependant.body_params
-    }
-    assert "patient_id" not in params, (
-        f"{route.path} accepts a patient_id; a self-grant must only ever target "
-        "the patient the route just created"
-    )
-    assert "patient_id" not in _path_param_names(route), (
-        f"{route.path} takes a patient_id path parameter"
+    offenders: list[str] = []
+    for route in [r for r in ALL_ROUTES if r.path in ALLOWED_GRANT_ROUTES]:
+        params = {p.name for p in route.dependant.query_params} | {
+            p.name for p in route.dependant.body_params
+        }
+        if "patient_id" in params or "patient_id" in _path_param_names(route):
+            offenders.append(route.path)
+    assert not offenders, (
+        f"{', '.join(offenders)} accept a patient_id; a self-grant must only "
+        "ever target the patient the route just created"
     )
 
 

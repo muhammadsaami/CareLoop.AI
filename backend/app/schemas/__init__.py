@@ -13,6 +13,12 @@ from app.schemas.adherence_log import (
     AdherenceLogUpdate,
     AdherenceLogResponse,
 )
+from app.schemas.auth import (
+    AuthSessionResponse,
+    LoginRequest,
+    RegisterRequest,
+    UserResponse,
+)
 
 __all__ = [
     "PatientCreate", "PatientUpdate", "PatientResponse",
@@ -21,4 +27,5 @@ __all__ = [
     "WarningSymptomCreate", "WarningSymptomUpdate", "WarningSymptomResponse",
     "CheckInCreate", "CheckInResponse",
     "AdherenceLogCreate", "AdherenceLogUpdate", "AdherenceLogResponse",
+    "RegisterRequest", "LoginRequest", "UserResponse", "AuthSessionResponse",
 ]
