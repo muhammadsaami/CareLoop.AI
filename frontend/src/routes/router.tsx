@@ -10,6 +10,7 @@ import { RequireAuth } from '@/routes/RequireAuth'
 import { ErrorState } from '@/components/ErrorState'
 import { LoadingState } from '@/components/LoadingState'
 import { SignInPage } from '@/pages/SignInPage'
+import { SignUpPage } from '@/pages/SignUpPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 
 /**
@@ -65,6 +66,7 @@ function screen(element: ReactNode) {
 
 export const router = createBrowserRouter([
   { path: '/sign-in', element: <SignInPage /> },
+  { path: '/sign-up', element: <SignUpPage /> },
   {
     path: '/',
     element: (

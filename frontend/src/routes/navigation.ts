@@ -24,8 +24,8 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/documents', label: 'Documents', shortLabel: 'Docs', icon: 'file', group: 'Records' },
   { to: '/medications', label: 'Medications', shortLabel: 'Meds', icon: 'pill', group: 'Records' },
   { to: '/appointments', label: 'Appointments', shortLabel: 'Visits', icon: 'calendar', group: 'Records' },
-  { to: '/assistant', label: 'CareLoop assistant', shortLabel: 'Assistant', icon: 'sparkle', group: 'Support' },
-  { to: '/caregiver', label: 'Care team', shortLabel: 'Care', icon: 'users', group: 'Support' },
+  { to: '/assistant', label: 'CareLoop AI', shortLabel: 'Assistant', icon: 'sparkle', group: 'Support' },
+  { to: '/caregiver', label: 'Caregiver', shortLabel: 'Care', icon: 'users', group: 'Support' },
   { to: '/settings', label: 'Settings', shortLabel: 'Settings', icon: 'settings', group: 'Support' },
 ]
 

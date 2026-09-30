@@ -37,7 +37,7 @@ export const MAX_UPLOAD_BYTES = Number(env('VITE_MAX_UPLOAD_BYTES', '20971520'))
 /** Human-readable fallback copy, keyed by status. */
 const STATUS_MESSAGES: Record<number, string> = {
   400: 'The request could not be processed as sent.',
-  401: 'Your access token is missing, expired, or no longer valid. Sign in again.',
+  401: 'Your session has expired. Sign in again.',
   403: 'Your care team has not granted access to this record.',
   404: 'This record is no longer available.',
   409: 'That action conflicts with the current state of this record.',

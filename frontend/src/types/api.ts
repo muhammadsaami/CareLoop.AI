@@ -599,6 +599,37 @@ export interface EscalationTransitionRequest {
 }
 
 /* -------------------------------------------------------------------------
+ * Authentication (Phase 8A)
+ * ---------------------------------------------------------------------- */
+
+export interface RegisterRequest {
+  full_name: string
+  email: string
+  password: string
+}
+
+export interface LoginRequest {
+  email: string
+  password: string
+}
+
+export interface AuthUser {
+  id: string
+  email: string
+  full_name: string
+  is_active: boolean
+  /** The account's self-granted patient record, or null for operator-only accounts. */
+  patient_id: string | null
+}
+
+export interface AuthSession {
+  access_token: string
+  token_type: 'bearer'
+  user: AuthUser
+  patient_id: string | null
+}
+
+/* -------------------------------------------------------------------------
  * Health (the only public endpoints)
  * ---------------------------------------------------------------------- */
 

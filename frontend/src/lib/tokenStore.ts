@@ -1,20 +1,15 @@
 /**
  * Session storage for the bearer token.
  *
- * WHY THIS FILE EXISTS INSTEAD OF A LOGIN FORM
- * --------------------------------------------
- * The backend exposes no `/login`, `/register`, `/refresh` or `/me` endpoint.
- * Access tokens are minted by an operator running
- *   `python -m app.cli.manage_access ...`
- * and presented as `Authorization: Bearer <jwt>`. There is nothing to POST a
- * password to, so this app does not pretend otherwise: the sign-in screen
- * accepts an issued access token and validates it by calling `GET /patients`.
+ * The token is the encrypted session handed back by `POST /api/v1/auth/login`
+ * or `POST /api/v1/auth/register`. The app never asks a patient for one: the
+ * sign-in forms obtain it, this store keeps it, and the API client attaches it
+ * as `Authorization: Bearer <token>` to every authenticated request.
  *
  * SECURITY NOTES
  *  - The token is a bearer credential, so it is kept in `sessionStorage`, not
  *    `localStorage`: it does not survive a tab close, which is the right
- *    default for shared/home devices. Documented as a deliberate trade-off;
- *    the real fix is a backend login endpoint.
+ *    default for shared/home devices. Documented as a deliberate trade-off.
  *  - The token is never written to the console, never put in a URL, and never
  *    sent anywhere except the configured API base URL.
  */

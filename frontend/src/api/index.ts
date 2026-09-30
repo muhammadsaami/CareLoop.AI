@@ -7,7 +7,9 @@
  * one auditable place.
  *
  * Endpoint facts worth remembering while reading this file:
- *  - every route below requires `Authorization: Bearer <jwt>` except health
+ *  - every route below requires `Authorization: Bearer <jwt>` except health AND
+ *    the two auth endpoints (register/login are the entry points that create
+ *    the token in the first place)
  *  - list endpoints return BARE ARRAYS, except notifications and daily
  *    check-in history which return an envelope
  *  - the backend returns 404 (not 403) for records outside the caller's grants
@@ -22,6 +24,8 @@ import type {
   AppointmentCreate,
   AppointmentReminderCreate,
   AppointmentUpdate,
+  AuthSession,
+  AuthUser,
   CheckIn,
   CheckInCreate,
   CheckInQuestionSet,
@@ -47,6 +51,8 @@ import type {
   PatientCreate,
   PatientUpdate,
   Readiness,
+  RegisterRequest,
+  LoginRequest,
   Reminder,
   ReminderUpdate,
   WarningSymptom,
@@ -59,6 +65,25 @@ import type {
 export const healthApi = {
   health: () => http.get<Health>('/health', { anonymous: true }),
   readiness: () => http.get<Readiness>('/health/ready', { anonymous: true }),
+}
+
+/* --------------------------------- auth ---------------------------------- */
+/**
+ * Self-service authentication (Phase 8A).
+ *
+ * `register` and `login` are the ONLY places the app performs credential
+ * exchange, and both are deliberately `anonymous` — there is no token to send
+ * yet, and a 401 from login must not trip the global session handler. `me`
+ * resolves the account behind the stored token (this is also how a page
+ * refresh re-validates a session). There is no `logout`: the backend has no
+ * token-revocation endpoint, so sign-out is purely client-side.
+ */
+export const authApi = {
+  register: (body: RegisterRequest) =>
+    http.post<AuthSession>('/auth/register', { json: body, anonymous: true }),
+  login: (body: LoginRequest) =>
+    http.post<AuthSession>('/auth/login', { json: body, anonymous: true }),
+  me: (signal?: AbortSignal) => http.get<AuthUser>('/auth/me', { signal }),
 }
 
 /* -------------------------------- patients ------------------------------- */

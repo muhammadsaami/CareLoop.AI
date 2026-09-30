@@ -32,8 +32,8 @@ type ProfileValues = z.input<typeof profileSchema>
  * Two honest limits are surfaced here rather than hidden:
  *  - there is no preferences/notifications-settings API, so reminder defaults
  *    are not editable, only readable;
- *  - there is no `/me` or profile endpoint, so "your account" is the patient
- *    record, and the fields here are exactly `PATCH /patients/{id}`.
+ *  - the editable profile fields are exactly `PATCH /patients/{id}`; account
+ *    access is managed through your care team and the sign-in screen.
  */
 export function SettingsPage() {
   const { patient, patientId, patients, select } = useActivePatient()
@@ -234,8 +234,8 @@ export function SettingsPage() {
           <Card padding="md">
             <CardHeader title="Session" icon={<Icon name="shield" size={18} />} />
             <p className="mt-2 text-[13px] leading-relaxed text-ink-500">
-              You are signed in with an access token that lasts for this browser tab only. Signing
-              out clears it from this device.
+              Your session lasts for this browser tab only. Signing out clears it from this
+              device.
             </p>
             <dl className="mt-2 divide-y divide-line">
               <DetailRow

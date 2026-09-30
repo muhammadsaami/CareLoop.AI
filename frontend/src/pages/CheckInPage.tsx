@@ -28,38 +28,40 @@ export function CheckInPage() {
 
   return (
     <div className="px-4 py-6 sm:px-6 lg:px-8">
-      <PageHeader
-        eyebrow={
-          <span className="inline-flex items-center gap-1.5 text-[13px] text-ink-400">
-            <Icon name="shield" size={14} />
-            Answers come from a fixed set of choices
-          </span>
-        }
-        title="Daily check-in"
-        description="A few questions about how you are today. Your answers are compared with the warning symptoms on your discharge instructions, and your care team is told if something changed."
-        actions={
-          <>
-            <Button variant="secondary" onClick={() => setShowSchedule(true)}>
-              Set a reminder
-            </Button>
-            <Button variant="ghost" onClick={() => setShowHistory((value) => !value)}>
-              {showHistory ? 'Hide history' : 'Past check-ins'}
-            </Button>
-          </>
-        }
-      />
+      <div className="mx-auto w-full max-w-[1100px]">
+        <PageHeader
+          eyebrow={
+            <span className="inline-flex items-center gap-1.5 text-[13px] text-ink-400">
+              <Icon name="shield" size={14} />
+              Answers come from a fixed set of choices
+            </span>
+          }
+          title="Daily Check-in"
+          description="A few questions about how you are today. Your answers are compared with your recent recovery and documented warning symptoms."
+          actions={
+            <>
+              <Button variant="secondary" onClick={() => setShowSchedule(true)}>
+                Set a reminder
+              </Button>
+              <Button variant="ghost" onClick={() => setShowHistory((value) => !value)}>
+                {showHistory ? 'Hide history' : 'Past check-ins'}
+              </Button>
+            </>
+          }
+        />
 
-      <div className="max-w-3xl space-y-5">
-        {showHistory ? (
-          <Card padding="md">
-            <CardHeader title="Past check-ins" description="Most recent first" />
-            <div className="mt-3">
-              <CheckInHistory patientId={patientId} />
-            </div>
-          </Card>
-        ) : null}
+        <div className="space-y-5">
+          {showHistory ? (
+            <Card padding="md">
+              <CardHeader title="Past check-ins" description="Most recent first" />
+              <div className="mt-3">
+                <CheckInHistory patientId={patientId} />
+              </div>
+            </Card>
+          ) : null}
 
-        <CheckInForm patientId={patientId} timezone={patient.timezone} />
+          <CheckInForm patientId={patientId} timezone={patient.timezone} />
+        </div>
       </div>
 
       {showSchedule ? (

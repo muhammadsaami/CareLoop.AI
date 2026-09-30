@@ -9,7 +9,7 @@ import { ActivePatientContext, type ActivePatientContextValue } from './activePa
 /**
  * Resolves which patient the app is showing.
  *
- * A single access token can hold several patient grants (`self`, `caregiver`,
+ * An account can hold several patient grants (`self`, `caregiver`,
  * `care_team`), and the backend has no "current patient" concept, so the choice
  * lives here and is remembered for the tab.
  */

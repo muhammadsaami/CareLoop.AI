@@ -47,6 +47,8 @@ const PATHS = {
   inbox: 'M3.5 13.5h4l1.5 3h6l1.5-3h4M3.5 13.5 6 5.5h12l2.5 8v5a1.5 1.5 0 0 1-1.5 1.5H5a1.5 1.5 0 0 1-1.5-1.5v-5Z',
   layers: 'M12 3.5 3 8l9 4.5L21 8l-9-4.5ZM3 12.5l9 4.5 9-4.5M3 17l9 4.5 9-4.5',
   star: 'M12 4l2.4 5 5.6.8-4 3.9 1 5.5-5-2.7-5 2.7 1-5.5-4-3.9 5.6-.8L12 4Z',
+  activity: 'M3 12h3.2l2.1-5.5 4.2 11 2.5-5.5H21',
+  heart: 'M20.8 6.7a5.5 5.5 0 0 0-7.8 0l-1 1-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21.2l7.8-7.7 1-1a5.5 5.5 0 0 0 0-7.8Z',
 } as const
 
 export type IconName = keyof typeof PATHS
@@ -74,30 +76,6 @@ export function Icon({ name, className, size = 20 }: IconProps) {
       focusable="false"
     >
       <path d={PATHS[name]} />
-    </svg>
-  )
-}
-
-/** The CareLoop wordmark glyph, used in the header and on the sign-in screen. */
-export function BrandMark({ className, size = 32 }: { className?: string; size?: number }) {
-  return (
-    <svg
-      className={className}
-      width={size}
-      height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <rect width="32" height="32" rx="9" fill="currentColor" />
-      <path
-        d="M16 8.5v15M8.5 16h15"
-        stroke="white"
-        strokeWidth="2.6"
-        strokeLinecap="round"
-        opacity="0.95"
-      />
     </svg>
   )
 }

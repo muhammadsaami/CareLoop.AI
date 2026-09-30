@@ -2,10 +2,17 @@ import { forwardRef, useId, type InputHTMLAttributes, type ReactNode, type Texta
 import { cn } from '@/lib/cn'
 
 const CONTROL_BASE =
-  'w-full rounded-[var(--radius-control)] border bg-surface px-3 text-sm text-ink-900 ' +
+  'w-full border bg-surface text-sm text-ink-900 ' +
   'placeholder:text-ink-400 transition-colors duration-150 ' +
   'focus:outline-none focus:ring-2 focus:ring-brand-600/25 focus:border-brand-600 ' +
   'disabled:cursor-not-allowed disabled:bg-ink-50 disabled:text-ink-500'
+
+const CONTROL_SIZES = {
+  md: 'h-10 rounded-[var(--radius-control)] px-3',
+  lg: 'h-[52px] rounded-[var(--radius-control-lg)] px-4 text-[15px]',
+} as const
+
+export type InputSize = keyof typeof CONTROL_SIZES
 
 function controlState(invalid?: boolean): string {
   return invalid
@@ -50,17 +57,18 @@ function FieldShell({ id, label, hint, error, required, children, className }: F
   )
 }
 
-export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+export interface InputProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'size'> {
   label?: ReactNode
   hint?: ReactNode
   error?: string
+  size?: InputSize
   leadingIcon?: ReactNode
   trailingSlot?: ReactNode
   containerClassName?: string
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { label, hint, error, leadingIcon, trailingSlot, className, containerClassName, id, ...rest },
+  { label, hint, error, size = 'md', leadingIcon, trailingSlot, className, containerClassName, id, ...rest },
   ref,
 ) {
   const generatedId = useId()
@@ -88,7 +96,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
           aria-describedby={error ? `${inputId}-error` : hint ? `${inputId}-hint` : undefined}
           className={cn(
             CONTROL_BASE,
-            'h-10',
+            CONTROL_SIZES[size],
             controlState(Boolean(error)),
             leadingIcon && 'pl-9',
             trailingSlot && 'pr-10',
@@ -133,7 +141,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
         rows={rows}
         aria-invalid={error ? true : undefined}
         aria-describedby={error ? `${inputId}-error` : hint ? `${inputId}-hint` : undefined}
-        className={cn(CONTROL_BASE, 'resize-y py-2.5', controlState(Boolean(error)), className)}
+        className={cn(CONTROL_BASE, CONTROL_SIZES.md, 'resize-y py-2.5', controlState(Boolean(error)), className)}
         {...rest}
       />
     </FieldShell>

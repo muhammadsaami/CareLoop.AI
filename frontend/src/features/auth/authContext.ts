@@ -1,14 +1,16 @@
 import { createContext } from 'react'
+import type { AuthUser } from '@/types/api'
 
 export type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated'
 
 export interface AuthContextValue {
   status: AuthStatus
-  /** True once a token exists. The token itself is deliberately not exposed. */
+  /** The authenticated account, resolved from `/auth/me`. Null before sign-in. */
+  user: AuthUser | null
+  /** True once a session token exists. The token itself is deliberately not exposed. */
   hasToken: boolean
-  /** Patient ids the token grants access to, used to scope the whole app. */
-  patientIds: string[]
-  signIn: (token: string) => Promise<void>
+  signIn: (email: string, password: string) => Promise<void>
+  signUp: (fullName: string, email: string, password: string) => Promise<void>
   signOut: () => void
   /** Reports that the backend rejected the current token. */
   invalidate: () => void

@@ -20,72 +20,85 @@
   --font-mono:
     ui-monospace, SFMono-Regular, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
 
-  /* Brand — deep clinical teal */
-  --color-brand-50: #eefaf8;
-  --color-brand-100: #d5f2ee;
-  --color-brand-200: #ade5df;
-  --color-brand-300: #78d1c9;
-  --color-brand-400: #44b5ae;
-  --color-brand-500: #249a94;
-  --color-brand-600: #1a7d79;
-  --color-brand-700: #186462;
-  --color-brand-800: #17504f;
-  --color-brand-900: #164140;
-  --color-brand-950: #072624;
+  /* Brand — deep clinical teal (primary #176B87, light #E8F5F8) */
+  --color-brand-50: #e8f5f8;
+  --color-brand-100: #d3ecf1;
+  --color-brand-200: #a9d8e2;
+  --color-brand-300: #7ac0cf;
+  --color-brand-400: #4ba3b8;
+  --color-brand-500: #2a879e;
+  --color-brand-600: #176b87;
+  --color-brand-700: #145c74;
+  --color-brand-800: #115065;
+  --color-brand-900: #0e3f52;
+  --color-brand-950: #07222e;
 
-  /* Ink — cool slate text ramp */
-  --color-ink-50: #f7f9fa;
-  --color-ink-100: #eef2f3;
-  --color-ink-200: #dde4e6;
-  --color-ink-300: #c2ced1;
-  --color-ink-400: #8fa1a6;
-  --color-ink-500: #667b81;
-  --color-ink-600: #4d6167;
-  --color-ink-700: #3c4d52;
-  --color-ink-800: #2a383d;
-  --color-ink-900: #1b262a;
-  --color-ink-950: #0d1417;
+  /* Sidebar — the dark teal surface of the Figma shell. */
+  --color-sidebar: #0c3547;
+
+  /* Ink — cool gray text ramp (text #17202A, secondary #667085) */
+  --color-ink-50: #f2f4f7;
+  --color-ink-100: #eaecf0;
+  --color-ink-200: #d0d5dd;
+  --color-ink-300: #b3bac5;
+  --color-ink-400: #98a2b3;
+  --color-ink-500: #667085;
+  --color-ink-600: #475467;
+  --color-ink-700: #344054;
+  --color-ink-800: #1d2939;
+  --color-ink-900: #17202a;
+  --color-ink-950: #101828;
 
   /* Surfaces & lines */
-  --color-canvas: #f4f7f8;
+  --color-canvas: #f7fafc;
   --color-surface: #ffffff;
-  --color-surface-muted: #fafcfc;
-  --color-line: #e2e8ea;
-  --color-line-strong: #cfd9dc;
+  --color-surface-muted: #fbfcfd;
+  --color-line: #e4e7ec;
+  --color-line-strong: #d0d5dd;
 
   /* Signal — safety states only */
-  --color-success-50: #ecfdf3;
-  --color-success-200: #a9efc6;
-  --color-success-600: #12804a;
-  --color-success-700: #0d6639;
-  --color-success-900: #05341d;
+  --color-success-50: #edfbf4;
+  --color-success-100: #d7f5e5;
+  --color-success-200: #afebcc;
+  --color-success-400: #46bd85;
+  --color-success-500: #1e9a68;
+  --color-success-600: #16805c;
+  --color-success-700: #12694a;
+  --color-success-900: #073a27;
 
-  --color-warning-50: #fff8eb;
-  --color-warning-200: #fcd79a;
-  --color-warning-600: #a55a06;
-  --color-warning-700: #85470a;
-  --color-warning-900: #462704;
+  --color-warning-50: #fef8ed;
+  --color-warning-100: #fcefd7;
+  --color-warning-200: #f8deae;
+  --color-warning-400: #e0ac5e;
+  --color-warning-500: #d69a3c;
+  --color-warning-600: #b7791f;
+  --color-warning-700: #926017;
+  --color-warning-900: #4a310b;
 
   --color-danger-50: #fef2f2;
-  --color-danger-200: #fbcdcd;
-  --color-danger-500: #dc2626;
-  --color-danger-600: #c01c1c;
-  --color-danger-700: #9d1717;
-  --color-danger-900: #450a0a;
+  --color-danger-100: #fde3e3;
+  --color-danger-200: #fbc5c5;
+  --color-danger-400: #e05a5a;
+  --color-danger-500: #d43b3b;
+  --color-danger-600: #c53030;
+  --color-danger-700: #a02828;
+  --color-danger-900: #4a1212;
 
   --color-info-50: #eff6ff;
   --color-info-200: #bfdbfe;
   --color-info-600: #1d4ed8;
   --color-info-700: #1a3fae;
 
-  /* Radius */
-  --radius-card: 0.875rem;
+  /* Radius — soft cards, gently rounded controls */
+  --radius-card: 1rem;
   --radius-control: 0.625rem;
+  --radius-control-lg: 0.75rem;
+  --radius-auth-card: 1.375rem;
 
   /* Elevation — soft, low-spread, never harsh */
-  --shadow-soft: 0 1px 2px -1px rgb(13 20 23 / 0.06), 0 1px 3px 0 rgb(13 20 23 / 0.04);
-  --shadow-raised: 0 2px 4px -2px rgb(13 20 23 / 0.06), 0 4px 12px -2px rgb(13 20 23 / 0.07);
-  --shadow-overlay: 0 8px 24px -6px rgb(13 20 23 / 0.14), 0 2px 6px -2px rgb(13 20 23 / 0.08);
+  --shadow-soft: 0 1px 2px -1px rgb(16 24 40 / 0.06), 0 1px 3px 0 rgb(16 24 40 / 0.04);
+  --shadow-raised: 0 2px 4px -2px rgb(16 24 40 / 0.06), 0 4px 12px -2px rgb(16 24 40 / 0.07);
+  --shadow-overlay: 0 8px 24px -6px rgb(16 24 40 / 0.14), 0 2px 6px -2px rgb(16 24 40 / 0.08);
 
   /* Motion */
   --ease-calm: cubic-bezier(0.22, 0.61, 0.36, 1);

@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { Navigate, useLocation } from 'react-router-dom'
-import { BrandMark } from '@/components/Icon'
+import { CareLoopLogo } from '@/components/brand/CareLoopLogo'
 import { LoadingState } from '@/components/LoadingState'
 import { useAuth } from '@/features/auth/useAuth'
 
@@ -18,7 +18,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   if (status === 'loading') {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-6 bg-canvas px-6">
-        <BrandMark className="text-brand-700" size={36} />
+        <CareLoopLogo variant="icon" tone="light" size={44} />
         <div className="w-full max-w-xs">
           <LoadingState label="Checking your access" variant="block" />
         </div>
